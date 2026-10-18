@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Access WiFi Information：读取当前 SSID 以识别相机热点 -->
+	<key>com.apple.developer.networking.wifi-info</key>
+	<true/>
+	<!-- Hotspot Configuration：NEHotspotConfigurationManager.apply 的必需能力（实践指南确认） -->
+	<key>com.apple.developer.networking.HotspotConfiguration</key>
+	<true/>
+</dict>
+</plist>

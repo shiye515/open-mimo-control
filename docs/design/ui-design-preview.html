@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>OpenMimoControl · UI 设计稿</title>
+<script src="https://unpkg.com/lucide@latest"></script>
+<script>if (!window.lucide) document.write('<script src="https://cdn.jsdelivr.net/npm/lucide@latest/dist/umd/lucide.min.js"><\/script>');</script>
+<style>
+  :root { --foreground: #f2f2f7; --muted-foreground: #98989f; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: #0e0e11; color: var(--foreground);
+    font-family: -apple-system, "SF Pro Text", "PingFang SC", sans-serif;
+    background-image: radial-gradient(circle, #ffffff10 1px, transparent 1.4px);
+    background-size: 26px 26px;
+  }
+  .oc-stage { padding: 26px 10px 46px; }
+  .oc-pagehead { text-align: center; margin: 0 auto 24px; }
+  .oc-pagehead h1 { margin: 0; font-size: 18px; font-weight: 600; }
+  .oc-pagehead p { margin: 6px 0 0; font-size: 12px; color: var(--muted-foreground); }
+  .oc-row { display: flex; flex-wrap: wrap; gap: 26px; justify-content: center; align-items: flex-start; }
+  figure { margin: 0; text-align: center; }
+  figcaption { margin-top: 10px; font-size: 12px; color: var(--muted-foreground); line-height: 1.5; max-width: 310px; }
+  figcaption b { color: var(--foreground); font-weight: 500; }
+
+  /* ---- 手机框 ---- */
+  .phone {
+    width: 302px; height: 646px; margin: 0 auto;
+    background: #000; border: 3px solid #3a3a3c; border-radius: 44px;
+    position: relative; overflow: hidden; text-align: left;
+    display: flex; flex-direction: column;
+  }
+  .p-statusbar {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 14px 22px 4px; font-size: 12px; font-weight: 500; color: #fff; flex: none;
+  }
+  .p-statusbar .oc-icons { display: flex; gap: 5px; align-items: center; color: #fff; }
+  .p-home { position: absolute; bottom: 6px; left: 50%; transform: translateX(-50%); width: 120px; height: 5px; border-radius: 3px; background: #fff; opacity: .85; z-index: 30; }
+
+  /* ---- 图标尺寸：默认随字号，重点位置显式指定 ---- */
+  .phone svg { width: 1em; height: 1em; }
+  .p-statusbar svg { width: 13px; height: 13px; }
+  .oc-logo svg { width: 26px; height: 26px; }
+  .oc-picon svg { width: 16px; height: 16px; }
+  .oc-pok svg, #oc-ui-perm-single svg, .oc-prog-step svg { width: 12px; height: 12px; }
+  .oc-btn-connect svg { width: 18px; height: 18px; }
+
+  /* ---- 页 1 连接初始化（三态同布局） ---- */
+  .p1-wrap { flex: 1; padding: 16px 20px 28px; display: flex; flex-direction: column; min-height: 0; }
+  .p1-logo { text-align: center; margin: 10px 0 4px; flex: none; }
+  .p1-logo .oc-logo {
+    width: 56px; height: 56px; border-radius: 16px; margin: 0 auto 10px;
+    background: linear-gradient(145deg, #0a84ff, #0040dd); display: flex; align-items: center; justify-content: center; color: #fff;
+  }
+  .p1-logo h3 { margin: 0; font-size: 16px; font-weight: 500; color: #fff; }
+  .p1-logo p { margin: 3px 0 0; font-size: 11.5px; color: #98989f; }
+  .oc-perms { background: #1c1c1e; border-radius: 14px; overflow: hidden; margin-top: 12px; flex: none; }
+  .oc-perm { display: flex; align-items: center; gap: 10px; padding: 11px 14px; }
+  #oc-ui-perm-single { background: #1c1c1e; border-radius: 14px; padding: 10px 14px; margin-top: 12px; font-size: 12px; color: #30d158; display: flex; align-items: center; gap: 6px; flex: none; }
+  .oc-perm + .oc-perm { border-top: 1px solid #2c2c2e; }
+  .oc-perm .oc-picon { width: 30px; height: 30px; border-radius: 8px; background: #2c2c2e; display: flex; align-items: center; justify-content: center; color: #0a84ff; flex: none; }
+  .oc-perm .oc-pname { flex: 1; font-size: 13px; color: #fff; }
+  .oc-perm .oc-pname small { display: block; font-size: 10.5px; color: #98989f; margin-top: 1px; }
+  .oc-pok { color: #30d158; font-size: 12px; display: flex; align-items: center; gap: 4px; }
+  .oc-pask { border: none; background: #0a84ff; color: #fff; font-size: 12px; padding: 5px 12px; border-radius: 14px; font-family: inherit; cursor: pointer; }
+
+  /* 进度条（按钮上方） */
+  .oc-prog { margin-top: 12px; background: #1c1c1e; border-radius: 14px; padding: 12px 14px; flex: none; }
+  .oc-prog-title { font-size: 12px; color: #98989f; margin-bottom: 9px; display: flex; justify-content: space-between; }
+  .oc-prog-title b { color: #fff; font-weight: 400; }
+  .oc-track { height: 6px; border-radius: 3px; background: #2c2c2e; overflow: hidden; }
+  .oc-track > div { height: 100%; border-radius: 3px; background: #0a84ff; }
+  .oc-track > div.is-done { background: #30d158; }
+  .oc-prog-step { margin-top: 8px; font-size: 11.5px; color: #c7c7cc; display: flex; align-items: center; gap: 6px; }
+  .oc-prog-step .oc-spin { width: 11px; height: 11px; border: 2px solid #0a84ff44; border-top-color: #0a84ff; border-radius: 50%; animation: oc-spin .8s linear infinite; flex: none; }
+  @keyframes oc-spin { to { transform: rotate(360deg); } }
+
+  /* 底部大按钮 */
+  .oc-btn-connect {
+    margin-top: auto; width: 100%; padding: 16px 0; border: none; border-radius: 16px;
+    background: linear-gradient(145deg, #0a84ff, #0040dd); color: #fff;
+    font-size: 17px; font-weight: 500; font-family: inherit;
+    display: flex; align-items: center; justify-content: center; gap: 8px; cursor: pointer; flex: none;
+  }
+  .oc-btn-connect.is-disabled { background: #2c2c2e; color: #98989f; }
+  .oc-btn-connect.is-done { background: linear-gradient(145deg, #30d158, #1b8a3a); }
+  .oc-btn-note { margin-top: 8px; font-size: 10.5px; color: #8e8e93; text-align: center; flex: none; }
+
+  /* ---- 页 2 相机控制 ---- */
+  .p-body { flex: 1; min-height: 0; position: relative; display: flex; flex-direction: column; }
+  .p2-top { padding: 6px 14px 8px; flex: none; }
+  .p2-status { display: flex; align-items: center; gap: 8px; font-size: 11px; color: #c7c7cc; }
+  .p2-status .oc-right { margin-left: auto; display: flex; gap: 8px; font-size: 10px; white-space: nowrap; }
+  .p2-status2 { margin-top: 5px; font-size: 10.5px; color: #8e8e93; display: flex; gap: 10px; }
+  .p2-preview {
+    flex: none; aspect-ratio: 4 / 3; margin: 0 12px; border-radius: 14px; position: relative; overflow: hidden;
+    background:
+      radial-gradient(circle at 78% 30%, #b56a45 0 8%, transparent 9%),
+      radial-gradient(circle at 30% 22%, #e8e6e0 0 9%, transparent 10%),
+      radial-gradient(circle at 12% 55%, #37c15c 0 10%, transparent 11%),
+      linear-gradient(160deg, #2e2a26 0 46%, #7a4a2e 46% 74%, #26221e 74%);
+  }
+  .p2-peg { position: absolute; inset: 0; background-image: radial-gradient(circle, #00000055 1.6px, transparent 1.8px); background-size: 22px 16px; }
+  .p2-rec-ind { position: absolute; top: 8px; left: 8px; background: #000000aa; color: #fff; font-size: 10.5px; padding: 3px 8px; border-radius: 9px; display: flex; align-items: center; gap: 5px; }
+  .p2-rec-ind[hidden] { display: none; }
+  .p2-rec-ind::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #ff453a; animation: oc-blink 1s step-end infinite; }
+  @keyframes oc-blink { 50% { opacity: .25; } }
+
+  /* 拍摄参数：去掉标题直接平铺，占满视频预览与底部按钮之间的整个区域，超出在面板内滚动，底部按钮始终固定 */
+  .p2-params {
+    flex: 1 1 0; min-height: 0; margin: 10px 12px 0;
+    background: #1c1c1e; border-radius: 14px; overflow: hidden;
+    display: flex; flex-direction: column;
+  }
+  .p2-params-body { flex: 1; min-height: 0; overflow-y: auto; padding: 6px 14px 12px; scrollbar-width: none; }
+  .p2-params-body::-webkit-scrollbar { display: none; }
+  .oc-pgroup { font-size: 10.5px; color: #8e8e93; margin: 9px 0 5px; letter-spacing: .5px; }
+  .oc-pgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px 12px; }
+  .oc-pitem { display: flex; justify-content: space-between; font-size: 11.5px; background: #2c2c2e; border-radius: 8px; padding: 6px 9px; }
+  .oc-pitem span { color: #98989f; }
+  .oc-pitem b { color: #fff; font-weight: 400; }
+
+  .p2-bottom { flex: none; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 10px 22px 26px; gap: 8px; }
+  .oc-side {
+    background: none; border: none; color: #c7c7cc; font-size: 10.5px; font-family: inherit; cursor: pointer;
+    display: flex; flex-direction: row; align-items: center; gap: 6px; padding: 4px;
+  }
+  .oc-side svg { width: 17px; height: 17px; }
+  .oc-side.right { justify-self: end; }
+  .oc-side.left { justify-self: start; }
+  .oc-mode-btn-icon { display: flex; align-items: center; }
+  .oc-shutter {
+    width: 68px; height: 68px; border-radius: 50%; border: 3px solid #fff; background: transparent;
+    display: flex; align-items: center; justify-content: center; cursor: pointer; padding: 0; position: relative;
+  }
+  .oc-shutter .oc-inner { width: 54px; height: 54px; border-radius: 50%; background: #ff453a; transition: all .2s; }
+  .oc-shutter.is-rec { border-color: #ff453a; }
+  .oc-shutter.is-rec .oc-inner { border-radius: 10px; width: 26px; height: 26px; background: #ff453a; }
+  .oc-shutter.is-photo .oc-inner { background: #fff; }
+
+  /* ---- 模式弹窗 ---- */
+  .oc-sheet-mask { position: absolute; inset: 0; background: #00000099; z-index: 40; display: flex; align-items: flex-end; }
+  .oc-sheet-mask[hidden] { display: none; }
+  .oc-sheet { width: 100%; background: #1c1c1e; border-radius: 20px 20px 0 0; padding: 16px 16px 30px; }
+  .oc-sheet-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+  .oc-sheet-head b { color: #fff; font-size: 15px; font-weight: 500; }
+  .oc-sheet-head button { background: #2c2c2e; border: none; color: #98989f; font-size: 12px; padding: 5px 12px; border-radius: 13px; font-family: inherit; cursor: pointer; }
+  .oc-modes { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+  .oc-mode {
+    background: #2c2c2e; border: 1.5px solid transparent; border-radius: 13px; padding: 12px 8px;
+    display: flex; align-items: center; gap: 9px; cursor: pointer; color: #fff; font-size: 13px; font-family: inherit;
+  }
+  .oc-mode svg { color: #98989f; width: 17px; height: 17px; flex: none; }
+  .oc-mode.is-cur { border-color: #0a84ff; background: #0a84ff1f; }
+  .oc-mode.is-cur svg { color: #0a84ff; }
+
+  /* ---- 页 3 素材浏览 ---- */
+  .p3-head { display: flex; align-items: center; gap: 8px; padding: 8px 16px 10px; color: #fff; flex: none; }
+  .p3-head .oc-back { background: #1c1c1e; border: none; color: #0a84ff; width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; flex: none; }
+  .p3-head .oc-back svg { width: 17px; height: 17px; }
+  .p3-head b { font-size: 15px; font-weight: 500; }
+  .p3-head .oc-sdfree { margin-left: auto; font-size: 11px; color: #98989f; }
+  .p3-grid { flex: 1; overflow-y: auto; padding: 4px 12px 30px; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; align-content: start; }
+  .oc-thumb { aspect-ratio: 1/1; position: relative; overflow: hidden;
+    background: linear-gradient(150deg, #3a3a3c, #1c1c1e); }
+  /* 预览图以 cover 模式填充正方形格子（实现层 scaledToFill + clipped） */
+  .oc-thumb.video::after { content: ""; position: absolute; inset: 0; margin: auto; width: 0; height: 0; border-left: 11px solid #ffffffcc; border-top: 7px solid transparent; border-bottom: 7px solid transparent; }
+  .oc-thumb span { position: absolute; bottom: 0; left: 0; right: 0; padding: 12px 8px 4px; font-size: 9.5px; color: #ffffffcc; background: linear-gradient(transparent, #000000b3); word-break: break-all; }
+  .p3-note { padding: 0 16px 30px; font-size: 11px; color: #8e8e93; text-align: center; flex: none; }
+</style>
+</head>
+<body>
+<div class="oc-stage">
+  <div class="oc-pagehead">
+    <h1>OpenMimoControl · UI 设计稿</h1>
+    <p>参数平铺直出、超出滚动 · 顶部仅保留相机状态 · 底部左素材 / 右模式（纯图标）</p>
+  </div>
+  <div class="oc-row">
+
+    <!-- ① 页1 · 待连接 -->
+    <figure>
+      <div class="phone">
+        <div class="p-statusbar"><span>9:41</span><span class="oc-icons"><i data-lucide="signal" aria-hidden="true"></i><i data-lucide="wifi" aria-hidden="true"></i><i data-lucide="battery-full" aria-hidden="true"></i></span></div>
+        <div class="p1-wrap">
+          <div class="p1-logo">
+            <div class="oc-logo"><i data-lucide="camera" aria-hidden="true"></i></div>
+            <h3>OpenMimoControl</h3>
+            <p>Osmo Action 4 远程控制</p>
+          </div>
+          <div class="oc-perms">
+            <div class="oc-perm">
+              <span class="oc-picon"><i data-lucide="wifi" aria-hidden="true"></i></span>
+              <span class="oc-pname">本地网络<small>发现并连接相机热点</small></span>
+              <span class="oc-pask">申请</span>
+            </div>
+            <div class="oc-perm">
+              <span class="oc-picon"><i data-lucide="bluetooth" aria-hidden="true"></i></span>
+              <span class="oc-pname">蓝牙<small>配对 / 唤醒 / 获取凭据</small></span>
+              <span class="oc-pok"><i data-lucide="circle-check-big" aria-hidden="true"></i>已授权</span>
+            </div>
+            <div class="oc-perm">
+              <span class="oc-picon"><i data-lucide="map-pin" aria-hidden="true"></i></span>
+              <span class="oc-pname">定位<small>读取当前 Wi-Fi 名称</small></span>
+              <span class="oc-pask">申请</span>
+            </div>
+          </div>
+          <button class="oc-btn-connect" type="button"><i data-lucide="zap" aria-hidden="true"></i>连接相机</button>
+          <div class="oc-btn-note">点击后申请缺失权限并开始连接</div>
+        </div>
+        <div class="p-home"></div>
+      </div>
+      <figcaption><b>① 页1 · 待连接</b><br>权限未齐：对应行显示「申请」；大按钮沉底</figcaption>
+    </figure>
+
+    <!-- ② 页1 · 连接中 -->
+    <figure>
+      <div class="phone">
+        <div class="p-statusbar"><span>9:41</span><span class="oc-icons"><i data-lucide="signal" aria-hidden="true"></i><i data-lucide="wifi" aria-hidden="true"></i><i data-lucide="battery-full" aria-hidden="true"></i></span></div>
+        <div class="p1-wrap">
+          <div class="p1-logo">
+            <div class="oc-logo"><i data-lucide="camera" aria-hidden="true"></i></div>
+            <h3>OpenMimoControl</h3>
+            <p>Osmo Action 4 远程控制</p>
+          </div>
+          <div id="oc-ui-perm-single"><i data-lucide="circle-check-big" aria-hidden="true"></i>本地网络 · 蓝牙 · 定位 已授权</div>
+          <div class="oc-prog">
+            <div class="oc-prog-title"><b>正在连接相机</b><span>65%</span></div>
+            <div class="oc-track"><div style="width:65%"></div></div>
+            <div class="oc-prog-step"><span class="oc-spin"></span>热点入网…</div>
+          </div>
+          <button class="oc-btn-connect is-disabled" type="button">连接中…</button>
+          <div class="oc-btn-note">进度走完自动进入控制页面</div>
+        </div>
+        <div class="p-home"></div>
+      </div>
+      <figcaption><b>② 页1 · 连接中</b><br>进度条样式置于按钮上方，按钮禁用态</figcaption>
+    </figure>
+
+    <!-- ③ 页1 · 已连接 -->
+    <figure>
+      <div class="phone">
+        <div class="p-statusbar"><span>9:41</span><span class="oc-icons"><i data-lucide="signal" aria-hidden="true"></i><i data-lucide="wifi" aria-hidden="true"></i><i data-lucide="battery-full" aria-hidden="true"></i></span></div>
+        <div class="p1-wrap">
+          <div class="p1-logo">
+            <div class="oc-logo" style="background:linear-gradient(145deg,#30d158,#1b8a3a);"><i data-lucide="circle-check-big" aria-hidden="true"></i></div>
+            <h3>连接完成</h3>
+            <p>OsmoAction4-xxxx · 192.168.2.1</p>
+          </div>
+          <div class="oc-prog">
+            <div class="oc-prog-title"><b>连接成功</b><span style="color:#30d158;">100%</span></div>
+            <div class="oc-track"><div class="is-done" style="width:100%"></div></div>
+            <div class="oc-prog-step" style="color:#30d158;"><i data-lucide="circle-check-big" aria-hidden="true"></i>建立会话完成</div>
+          </div>
+          <button class="oc-btn-connect is-done" type="button"><i data-lucide="sliders-horizontal" aria-hidden="true"></i>已连接 · 自动进入控制页</button>
+          <div class="oc-btn-note">最后一步完成即自动进入，无需点击</div>
+        </div>
+        <div class="p-home"></div>
+      </div>
+      <figcaption><b>③ 页1 · 已连接</b><br>进度 100% 变绿 → 自动进入控制页</figcaption>
+    </figure>
+
+    <!-- ④ 页2 · 控制主界面（可交互） -->
+    <figure>
+      <div class="phone" id="oc-p2">
+        <div class="p-statusbar"><span>14:43</span><span class="oc-icons"><i data-lucide="signal" aria-hidden="true"></i><i data-lucide="wifi" aria-hidden="true"></i><i data-lucide="battery-full" aria-hidden="true"></i></span></div>
+        <div class="p-body">
+          <div class="p2-top">
+            <div class="p2-status">
+              <span class="oc-right">
+                <span>电量 78% · 51.0°C</span>
+                <span>SD 108.2G</span>
+              </span>
+            </div>
+            <div class="p2-status2"><span>1080p/50fps</span><span>FOV 广角</span><span>曝光 自动 · EV +2</span></div>
+          </div>
+          <div class="p2-preview">
+            <div class="p2-peg"></div>
+            <div class="p2-rec-ind" id="oc-recind" hidden>REC <span id="oc-rectime">00:00</span></div>
+          </div>
+          <div class="p2-params">
+            <div class="p2-params-body">
+              <div class="oc-pgroup">曝光</div>
+              <div class="oc-pgrid">
+                <div class="oc-pitem"><span>曝光模式</span><b>自动</b></div>
+                <div class="oc-pitem"><span>ISO</span><b>自动</b></div>
+                <div class="oc-pitem"><span>快门</span><b>—</b></div>
+                <div class="oc-pitem"><span>EV 补偿</span><b>+2 EV</b></div>
+              </div>
+              <div class="oc-pgroup">图像</div>
+              <div class="oc-pgrid">
+                <div class="oc-pitem"><span>白平衡</span><b>自动</b></div>
+                <div class="oc-pitem"><span>色彩</span><b>Normal</b></div>
+                <div class="oc-pitem"><span>锐度 / 降噪</span><b>0 / 0</b></div>
+                <div class="oc-pitem"><span>视野</span><b>广角</b></div>
+                <div class="oc-pitem"><span>防抖</span><b>RockSteady</b></div>
+              </div>
+              <div class="oc-pgroup">格式</div>
+              <div class="oc-pgrid">
+                <div class="oc-pitem"><span>视频格式</span><b>1080p 16:9</b></div>
+                <div class="oc-pitem"><span>帧率</span><b>50 fps</b></div>
+              </div>
+            </div>
+          </div>
+          <div class="p2-bottom">
+            <button class="oc-side left" type="button" aria-label="素材浏览"><i data-lucide="images" aria-hidden="true"></i></button>
+            <button class="oc-shutter" type="button" id="oc-shutter" aria-label="录制"><span class="oc-inner"></span></button>
+            <button class="oc-side right" type="button" id="oc-mode-btn" aria-label="录制模式">
+              <span class="oc-mode-btn-icon" id="oc-mode-btn-icon"><i data-lucide="video" aria-hidden="true"></i></span>
+            </button>
+          </div>
+          <div class="oc-sheet-mask" id="oc-sheet" hidden>
+            <div class="oc-sheet">
+              <div class="oc-sheet-head"><b>录制模式</b><button type="button" id="oc-sheet-close">取消</button></div>
+              <div class="oc-modes">
+                <button class="oc-mode" type="button" data-mode="photo"><i data-lucide="camera" aria-hidden="true"></i>拍照</button>
+                <button class="oc-mode is-cur" type="button" data-mode="video"><i data-lucide="video" aria-hidden="true"></i>视频</button>
+                <button class="oc-mode" type="button" data-mode="night"><i data-lucide="moon" aria-hidden="true"></i>超级夜景</button>
+                <button class="oc-mode" type="button" data-mode="slowmo"><i data-lucide="turtle" aria-hidden="true"></i>慢动作</button>
+                <button class="oc-mode" type="button" data-mode="hyperlapse"><i data-lucide="gauge" aria-hidden="true"></i>运动延时</button>
+                <button class="oc-mode" type="button" data-mode="timelapse"><i data-lucide="timer" aria-hidden="true"></i>静止延时</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="p-home"></div>
+      </div>
+      <figcaption><b>④ 页2 · 控制主界面</b><br>可交互：录制钮 / 右下模式图标选模式；参数全部平铺、超出面板滚动，底部按钮固定（素材浏览见 ⑦）</figcaption>
+    </figure>
+
+    <!-- ⑤ 页2 · 录制中 -->
+    <figure>
+      <div class="phone">
+        <div class="p-statusbar"><span>14:44</span><span class="oc-icons"><i data-lucide="signal" aria-hidden="true"></i><i data-lucide="wifi" aria-hidden="true"></i><i data-lucide="battery-full" aria-hidden="true"></i></span></div>
+        <div class="p-body">
+          <div class="p2-top">
+            <div class="p2-status">
+              <span class="oc-right">
+                <span>电量 78% · 51.5°C</span>
+                <span>SD 108.2G</span>
+              </span>
+            </div>
+            <div class="p2-status2"><span>1080p/50fps</span><span>FOV 广角</span><span>曝光 自动 · EV +2</span></div>
+          </div>
+          <div class="p2-preview">
+            <div class="p2-peg"></div>
+            <div class="p2-rec-ind">REC 00:12</div>
+          </div>
+          <div class="p2-params">
+            <div class="p2-params-body">
+              <div class="oc-pgroup">曝光</div>
+              <div class="oc-pgrid">
+                <div class="oc-pitem"><span>曝光模式</span><b>自动</b></div>
+                <div class="oc-pitem"><span>ISO</span><b>自动</b></div>
+                <div class="oc-pitem"><span>快门</span><b>—</b></div>
+                <div class="oc-pitem"><span>EV 补偿</span><b>+2 EV</b></div>
+              </div>
+              <div class="oc-pgroup">图像</div>
+              <div class="oc-pgrid">
+                <div class="oc-pitem"><span>白平衡</span><b>自动</b></div>
+                <div class="oc-pitem"><span>色彩</span><b>Normal</b></div>
+                <div class="oc-pitem"><span>锐度 / 降噪</span><b>0 / 0</b></div>
+                <div class="oc-pitem"><span>视野</span><b>广角</b></div>
+                <div class="oc-pitem"><span>防抖</span><b>RockSteady</b></div>
+              </div>
+              <div class="oc-pgroup">格式</div>
+              <div class="oc-pgrid">
+                <div class="oc-pitem"><span>视频格式</span><b>1080p 16:9</b></div>
+                <div class="oc-pitem"><span>帧率</span><b>50 fps</b></div>
+              </div>
+            </div>
+          </div>
+          <div class="p2-bottom">
+            <button class="oc-side left" type="button" aria-label="素材浏览"><i data-lucide="images" aria-hidden="true"></i></button>
+            <button class="oc-shutter is-rec" type="button" aria-label="停止"><span class="oc-inner"></span></button>
+            <button class="oc-side right" type="button" aria-label="录制模式"><i data-lucide="video" aria-hidden="true"></i></button>
+          </div>
+        </div>
+        <div class="p-home"></div>
+      </div>
+      <figcaption><b>⑤ 页2 · 录制中</b><br>顶部徽标转红 + REC 计时；录制钮内圆变方形停止</figcaption>
+    </figure>
+
+    <!-- ⑥ 页2 · 模式弹窗 -->
+    <figure>
+      <div class="phone">
+        <div class="p-statusbar"><span>14:44</span><span class="oc-icons"><i data-lucide="signal" aria-hidden="true"></i><i data-lucide="wifi" aria-hidden="true"></i><i data-lucide="battery-full" aria-hidden="true"></i></span></div>
+        <div class="p-body">
+          <div class="p2-top">
+            <div class="p2-status">
+              <span class="oc-right">
+                <span>电量 78% · 51.0°C</span>
+              </span>
+            </div>
+            <div class="p2-status2"><span>1080p/50fps</span><span>FOV 广角</span></div>
+          </div>
+          <div class="p2-preview"><div class="p2-peg"></div></div>
+          <div class="p2-params">
+            <div class="p2-params-body">
+              <div class="oc-pgroup">曝光</div>
+              <div class="oc-pgrid">
+                <div class="oc-pitem"><span>曝光模式</span><b>自动</b></div>
+                <div class="oc-pitem"><span>ISO</span><b>自动</b></div>
+                <div class="oc-pitem"><span>快门</span><b>—</b></div>
+                <div class="oc-pitem"><span>EV 补偿</span><b>+2 EV</b></div>
+              </div>
+              <div class="oc-pgroup">图像</div>
+              <div class="oc-pgrid">
+                <div class="oc-pitem"><span>白平衡</span><b>自动</b></div>
+                <div class="oc-pitem"><span>色彩</span><b>Normal</b></div>
+                <div class="oc-pitem"><span>锐度 / 降噪</span><b>0 / 0</b></div>
+                <div class="oc-pitem"><span>视野</span><b>广角</b></div>
+                <div class="oc-pitem"><span>防抖</span><b>RockSteady</b></div>
+              </div>
+              <div class="oc-pgroup">格式</div>
+              <div class="oc-pgrid">
+                <div class="oc-pitem"><span>视频格式</span><b>1080p 16:9</b></div>
+                <div class="oc-pitem"><span>帧率</span><b>50 fps</b></div>
+              </div>
+            </div>
+          </div>
+          <div class="p2-bottom">
+            <button class="oc-side left" type="button" aria-label="素材浏览"><i data-lucide="images" aria-hidden="true"></i></button>
+            <button class="oc-shutter" type="button" aria-label="录制"><span class="oc-inner"></span></button>
+            <button class="oc-side right" type="button" aria-label="录制模式"><i data-lucide="video" aria-hidden="true"></i></button>
+          </div>
+          <div class="oc-sheet-mask">
+            <div class="oc-sheet">
+              <div class="oc-sheet-head"><b>录制模式</b><button type="button">取消</button></div>
+              <div class="oc-modes">
+                <button class="oc-mode" type="button"><i data-lucide="camera" aria-hidden="true"></i>拍照</button>
+                <button class="oc-mode is-cur" type="button"><i data-lucide="video" aria-hidden="true"></i>视频</button>
+                <button class="oc-mode" type="button"><i data-lucide="moon" aria-hidden="true"></i>超级夜景</button>
+                <button class="oc-mode" type="button"><i data-lucide="turtle" aria-hidden="true"></i>慢动作</button>
+                <button class="oc-mode" type="button"><i data-lucide="gauge" aria-hidden="true"></i>运动延时</button>
+                <button class="oc-mode" type="button"><i data-lucide="timer" aria-hidden="true"></i>静止延时</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="p-home"></div>
+      </div>
+      <figcaption><b>⑥ 页2 · 录制模式弹窗</b><br>底部弹出六项，当前模式蓝色高亮，选中后右下角图标切换（见 ⑧）</figcaption>
+    </figure>
+
+    <!-- ⑦ 页3 · 素材浏览 -->
+    <figure>
+      <div class="phone">
+        <div class="p-statusbar"><span>14:45</span><span class="oc-icons"><i data-lucide="signal" aria-hidden="true"></i><i data-lucide="battery-full" aria-hidden="true"></i></span></div>
+        <div class="p-body">
+          <div class="p3-head">
+            <button class="oc-back" type="button" aria-label="返回"><i data-lucide="chevron-left" aria-hidden="true"></i></button>
+            <b>素材浏览</b>
+            <span class="oc-sdfree">SD 余 108.2GB</span>
+          </div>
+          <div class="p3-grid">
+            <div class="oc-thumb video"><span>DJI_0001.MP4 · 0:32</span></div>
+            <div class="oc-thumb"><span>DJI_0002.JPG</span></div>
+            <div class="oc-thumb video"><span>DJI_0003.MP4 · 1:07</span></div>
+            <div class="oc-thumb video"><span>DJI_0004.MP4 · 0:15</span></div>
+            <div class="oc-thumb"><span>DJI_0005.JPG</span></div>
+            <div class="oc-thumb video"><span>DJI_0006.MP4 · 2:41</span></div>
+            <div class="oc-thumb"><span>DJI_0007.JPG</span></div>
+            <div class="oc-thumb video"><span>DJI_0008.MP4 · 0:48</span></div>
+            <div class="oc-thumb"><span>DJI_0009.JPG</span></div>
+          </div>
+          <div class="p3-note">缩略图 / 下载 / 删除 — 素材协议尚未接入，此页为布局初步方案</div>
+        </div>
+        <div class="p-home"></div>
+      </div>
+      <figcaption><b>⑦ 页3 · 素材浏览（初步）</b><br>左上角返回图标 + SD 余量 + 3 列网格（视频/照片角标），内容待你补充需求</figcaption>
+    </figure>
+
+    <!-- ⑧ 页2 · 模式已选（底部图标化） -->
+    <figure>
+      <div class="phone">
+        <div class="p-statusbar"><span>14:46</span><span class="oc-icons"><i data-lucide="signal" aria-hidden="true"></i><i data-lucide="wifi" aria-hidden="true"></i><i data-lucide="battery-full" aria-hidden="true"></i></span></div>
+        <div class="p-body">
+          <div class="p2-top">
+            <div class="p2-status">
+              <span class="oc-right">
+                <span>电量 78% · 51.0°C</span>
+              </span>
+            </div>
+            <div class="p2-status2"><span>12MP · 4000×3000</span><span>FOV 广角</span></div>
+          </div>
+          <div class="p2-preview"><div class="p2-peg"></div></div>
+          <div class="p2-params">
+            <div class="p2-params-body">
+              <div class="oc-pgroup">曝光</div>
+              <div class="oc-pgrid">
+                <div class="oc-pitem"><span>曝光模式</span><b>自动</b></div>
+                <div class="oc-pitem"><span>ISO</span><b>自动</b></div>
+                <div class="oc-pitem"><span>快门</span><b>—</b></div>
+                <div class="oc-pitem"><span>EV 补偿</span><b>+2 EV</b></div>
+              </div>
+              <div class="oc-pgroup">图像</div>
+              <div class="oc-pgrid">
+                <div class="oc-pitem"><span>白平衡</span><b>自动</b></div>
+                <div class="oc-pitem"><span>色彩</span><b>Normal</b></div>
+                <div class="oc-pitem"><span>锐度 / 降噪</span><b>0 / 0</b></div>
+                <div class="oc-pitem"><span>视野</span><b>广角</b></div>
+                <div class="oc-pitem"><span>防抖</span><b>RockSteady</b></div>
+              </div>
+              <div class="oc-pgroup">格式</div>
+              <div class="oc-pgrid">
+                <div class="oc-pitem"><span>视频格式</span><b>1080p 16:9</b></div>
+                <div class="oc-pitem"><span>帧率</span><b>50 fps</b></div>
+              </div>
+            </div>
+          </div>
+          <div class="p2-bottom">
+            <button class="oc-side left" type="button" aria-label="素材浏览"><i data-lucide="images" aria-hidden="true"></i></button>
+            <button class="oc-shutter is-photo" type="button" aria-label="拍照"><span class="oc-inner"></span></button>
+            <button class="oc-side right" type="button" aria-label="录制模式 · 拍照"><i data-lucide="camera" aria-hidden="true"></i></button>
+          </div>
+        </div>
+        <div class="p-home"></div>
+      </div>
+      <figcaption><b>⑧ 页2 · 拍照模式</b><br>右下角图标跟随当前模式（点击可切换），快门切为白色拍照键；顶部不再展示模式与录制状态</figcaption>
+    </figure>
+
+  </div>
+</div>
+
+<script>
+(function () {
+  var p2 = document.getElementById('oc-p2');
+  if (!p2) return;
+
+  // 仅 ④ 页2 主界面可交互：录制切换 / 模式弹窗
+  var shutter = p2.querySelector('#oc-shutter');
+  var recind = p2.querySelector('#oc-recind');
+  var rectime = p2.querySelector('#oc-rectime');
+  var modeBtn = p2.querySelector('#oc-mode-btn');
+  var modeBtnIcon = p2.querySelector('#oc-mode-btn-icon');
+  var recording = false, recSec = 0, recTimer = null;
+  var modeIcons = { photo: 'camera', video: 'video', night: 'moon', slowmo: 'turtle', hyperlapse: 'gauge', timelapse: 'timer' };
+  var curMode = 'video';
+
+  function fmt(s) {
+    return (s < 10 ? '0' : '') + Math.floor(s / 60) + ':' + ('0' + (s % 60)).slice(-2);
+  }
+
+  shutter.addEventListener('click', function () {
+    recording = !recording;
+    shutter.classList.toggle('is-rec', recording);
+    if (curMode === 'photo') shutter.classList.toggle('is-photo', !recording);
+    recind.hidden = !recording;
+    if (recording) {
+      recSec = 0;
+      rectime.textContent = fmt(recSec);
+      recTimer = setInterval(function () {
+        recSec += 1;
+        rectime.textContent = fmt(recSec);
+      }, 1000);
+    } else {
+      clearInterval(recTimer);
+    }
+  });
+
+  var sheet = p2.querySelector('#oc-sheet');
+  modeBtn.addEventListener('click', function () { sheet.hidden = false; });
+  p2.querySelector('#oc-sheet-close').addEventListener('click', function () { sheet.hidden = true; });
+  sheet.addEventListener('click', function (e) { if (e.target === sheet) sheet.hidden = true; });
+  sheet.querySelectorAll('.oc-mode').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      curMode = btn.getAttribute('data-mode');
+      sheet.querySelectorAll('.oc-mode').forEach(function (b) { b.classList.toggle('is-cur', b === btn); });
+      // 底部右侧模式按钮：图标跟随所选模式
+      modeBtnIcon.innerHTML = '<i data-lucide="' + (modeIcons[curMode] || 'video') + '" aria-hidden="true"></i>';
+      if (window.lucide) lucide.createIcons();
+      shutter.classList.toggle('is-photo', curMode === 'photo');
+      sheet.hidden = true;
+    });
+  });
+
+  if (window.lucide) lucide.createIcons();
+})();
+</script>
+</body>
+</html>
