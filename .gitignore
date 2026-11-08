@@ -1,0 +1,97 @@
+# ===== macOS =====
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# ===== Xcode / iOS =====
+**/*.xcodeproj/project.xcworkspace/xcuserdata/
+**/*.xcodeproj/xcuserdata/
+**/*.xcworkspace/xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+*.xcuserstate
+*.xcuserdatad/
+DerivedData/
+build/
+Derived/
+*.ipa
+*.dSYM
+*.dSYM.zip
+*.hmap
+*.xcarchive
+*.app
+*.mobileprovision
+
+# ===== Swift Package Manager =====
+.build/
+.swiftpm/
+Packages/
+# 注意：App 工程中的 Package.resolved 通常应入库，因此不在此处忽略。
+
+# ===== Android / Gradle =====
+.gradle/
+**/build/
+**/out/
+**/captures/
+# 例外：协议分析的抓包脚本与说明入库（pcap 产物由子目录 .gitignore 排除）
+!docs/protocol/captures/
+**/.cxx/
+**/.externalNativeBuild/
+local.properties
+*.iml
+*.hprof
+android/.idea/
+android/.gradle/
+android/local.properties
+android/**/build/
+
+# ===== Android Studio / JetBrains =====
+.idea/
+*.iws
+*.iml
+*.ipr
+
+# ===== IDE / VS Code =====
+.vscode/
+
+# ===== 逆向/抓包原始产物 =====
+# 这些是原始抓包数据，分析结论已归档到 docs/protocol/ 等文档中。
+docs/*.pcap
+docs/*.pcapng
+docs/*.har
+
+# ===== 签名与密钥 =====
+*.jks
+*.keystore
+*.p12
+
+# ===== 临时文件 / 备份 =====
+*.swp
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+*~
+*.log
+
+# ===== 其他常见生成物 =====
+coverage/
+htmlcov/
+
+# ===== Loop 迭代日志（仅本地，逐轮调试原始记录不入库） =====
+docs/loop/logs/
+
+# ===== 个人设备与凭据（开源隐私审计：不入库） =====
+# 设备台账/运行手册含真实 UDID、密码、设备名
+docs/setup/device-facts.md
+docs/setup/runbook-emulator-bridge.md
+# 抓包产物（含真实 MAC/IP/凭据帧；上面 docs/*.pcap 不覆盖子目录，这里补齐）
+docs/**/*.pcap
+docs/**/*.pcapng
+docs/**/*.har
+# 个人参考资料（逆向笔记、官方 App 录屏、截图、第三方示例工程）
+docs/reference/

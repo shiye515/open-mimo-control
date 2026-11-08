@@ -1,0 +1,3 @@
+# 抓包产物体积大（含视频流），不入库；分析结论沉淀到 docs/protocol/*.md
+*.pcap
+*.pcapng
