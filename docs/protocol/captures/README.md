@@ -12,15 +12,17 @@
 ## 抓包步骤（变焦/倒计时等待定命令）
 
 ```bash
-# 1. 启动（rvi0 不存在时脚本会自动挂载；UDID 为必填参数）
-bash start-zoom-capture.sh <你的iPhone的UDID>
+# 1. 启动（连接好手机直接运行：自动获取 UDID、自动挂载网卡、自动开始抓包；
+#    多台设备时交互选择，也可传参指定）
+bash tcp-capture.sh
+#    bash tcp-capture.sh <指定iPhone的UDID>
 
 # 2. 手机上操作（抓包期间）：
 #    - 先关闭 OpenMimoControl（释放相机单客户端连接）
 #    - 打开 DJI Mimo → 连接相机 → 进入拍摄界面
 #    - 执行待分析操作（如拍照/视频模式下捏合变焦，每步间隔 2-3 秒）
 
-# 3. 终端 Ctrl+C 停止抓包，产物为本目录下 zoom-capture-<时间戳>.pcap
+# 3. 终端 Ctrl+C 停止抓包，产物为本目录下 tcp-capture-<时间戳>.pcap
 ```
 
 ## 分析

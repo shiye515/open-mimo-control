@@ -3,6 +3,7 @@ import Combine
 import CoreBluetooth
 import CoreLocation
 import Network
+import OpenMimoProtocol
 
 /// 连接页权限行状态。蓝牙/定位读系统真实授权；本地网络 iOS 无公开查询 API，
 /// 用派生信号：成功建立过会话即视为已授权（UserDefaults 持久），
@@ -193,106 +194,33 @@ struct RecBadge: View {
     }
 }
 
-// MARK: - 变焦轮盘（0.1x 刻度带随值滑动、整数焦段磁吸 + 触觉反馈）
+// MARK: - 取景网格叠加（官方 Mimo 同款：App 端预览显示，不向相机发送任何命令）
 
-struct ZoomWheelView: View {
-    let range: ClosedRange<Double>          // 拍照 1.0...4.0 / 视频 1.0...2.0
-    let snapPoints: [Double]                // 整数焦段（磁吸 + 高亮）
-    @Binding var value: Double
-    /// 每跨过一个 0.1x 刻度回调（外部节流发送绝对位置命令）
-    var onTickChange: (Double) -> Void = { _ in }
-    /// 松手磁吸完成后回调（发送最终位置）
-    var onCommit: (Double) -> Void = { _ in }
-
-    @State private var lastZoomFactor: Double = 1.0
-    private let lightImpact = UIImpactFeedbackGenerator(style: .light)
-    private let rigidImpact = UIImpactFeedbackGenerator(style: .rigid)
-
-    private var tickCount: Int {
-        Int((range.upperBound - range.lowerBound) / 0.1)
-    }
+/// 三分网格 + 可选对角线；mode: 1=网格线 2=网格线和对角线
+struct FramingGridOverlay: View {
+    let mode: Int
 
     var body: some View {
-        VStack(spacing: 16) {
-            Text(String(format: "%.1fx", value))
-                .font(.system(size: 28, weight: .bold, design: .rounded).monospacedDigit())
-                .foregroundStyle(OC.accent)
-            GeometryReader { geometry in
-                let center = geometry.size.width / 2
-                ZStack(alignment: .top) {
-                    // 生效对齐点（轮盘外部的固定指示，刻度滑到正下方即生效）
-                    VStack(spacing: 2) {
-                        Rectangle()
-                            .fill(OC.accent)
-                            .frame(width: 2, height: 8)
-                        Circle()
-                            .fill(OC.accent)
-                            .frame(width: 5, height: 5)
-                    }
-                    .position(x: center, y: 12)
-                    // 0.1x 细刻度；0.5x 主刻度标数字；整数焦段加粗高亮（无背景、无边缘衰减）
-                    ForEach(0...tickCount, id: \.self) { index in
-                        let tickValue = range.lowerBound + Double(index) * 0.1
-                        let isSnapPoint = snapPoints.contains(tickValue)
-                        let isMajor = Int(tickValue * 10) % 5 == 0
-                        let xOffset = (tickValue - value) * 150 + center
-                        VStack(spacing: 4) {
-                            Rectangle()
-                                .fill(isSnapPoint ? OC.accent : (isMajor ? OC.textSecondary : Color.gray))
-                                .frame(width: isSnapPoint ? 3 : 1.5,
-                                       height: isSnapPoint ? 26 : (isMajor ? 16 : 9))
-                            if isMajor {
-                                Text(String(format: "%g", tickValue))
-                                    .font(.system(size: 9, weight: isSnapPoint ? .semibold : .regular).monospacedDigit())
-                                    .foregroundStyle(isSnapPoint ? OC.accent : OC.textSecondary)
-                                    .fixedSize()
-                            } else {
-                                Color.clear.frame(height: 12)
-                            }
-                        }
-                        .position(x: xOffset, y: 48)
-                    }
+        GeometryReader { g in
+            let w = g.size.width
+            let h = g.size.height
+            Path { p in
+                for i in 1...2 {
+                    p.move(to: CGPoint(x: w * CGFloat(i) / 3, y: 0))
+                    p.addLine(to: CGPoint(x: w * CGFloat(i) / 3, y: h))
+                    p.move(to: CGPoint(x: 0, y: h * CGFloat(i) / 3))
+                    p.addLine(to: CGPoint(x: w, y: h * CGFloat(i) / 3))
                 }
-                .clipped()
+                if mode >= 2 {
+                    p.move(to: CGPoint(x: 0, y: 0))
+                    p.addLine(to: CGPoint(x: w, y: h))
+                    p.move(to: CGPoint(x: w, y: 0))
+                    p.addLine(to: CGPoint(x: 0, y: h))
+                }
             }
-            .frame(height: 90)
-            .background(RoundedRectangle(cornerRadius: 12).fill(OC.pill.opacity(0.6)))
-            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(OC.stroke, lineWidth: 1))
-            .contentShape(RoundedRectangle(cornerRadius: 12))
-            .gesture(
-                    DragGesture(minimumDistance: 0)
-                        .onChanged { value in
-                            let delta = -value.translation.width * 0.005
-                            let newFactor = min(max(lastZoomFactor + delta, range.lowerBound), range.upperBound)
-                            let oldTick = Int(self.value * 10)
-                            let newTick = Int(newFactor * 10)
-                            if oldTick != newTick {
-                                let rounded = Double(newTick) / 10.0
-                                if snapPoints.contains(rounded) {
-                                    rigidImpact.impactOccurred(intensity: 0.9)
-                                } else {
-                                    lightImpact.impactOccurred(intensity: 0.3)
-                                }
-                            }
-                            self.value = newFactor
-                            if oldTick != newTick { onTickChange(newFactor) }
-                        }
-                        .onEnded { _ in
-                            let closest = snapPoints.min {
-                                abs($0 - self.value) < abs($1 - self.value)
-                            } ?? self.value
-                            if abs(closest - self.value) < 0.25 {
-                                withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
-                                    self.value = closest
-                                }
-                                rigidImpact.impactOccurred(intensity: 1.0)
-                            }
-                            lastZoomFactor = self.value
-                            onCommit(self.value)
-                        }
-                )
+            .stroke(Color.white.opacity(0.45), lineWidth: 0.8)
         }
-        .onAppear { lastZoomFactor = value }   // 首拖以弹出时的实际倍率为基准（不强制回 1.0）
+        .allowsHitTesting(false)
     }
 }
 

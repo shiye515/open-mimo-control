@@ -103,18 +103,46 @@ public enum OSMOA4 {
 
     public static let isoCodes: [(code: UInt8, value: Int)] = [
         (0x03, 100), (0x04, 200), (0x05, 400), (0x06, 800), (0x07, 1600),
-        (0x08, 3200), (0x09, 6400), (0x0A, 12800), (0x0B, 25600), (0x0C, 51200),
+        (0x08, 3200), (0x09, 6400), (0x0A, 12800),   // OA4 上限 12800
     ]
     public static let isoName: [UInt8: String] = [0x00: "自动"]
 
-    /// 快门速度表（u16 | 十分位<<16），1/8000s-30s（osmo-client SHUTTER_SPEEDS）
+    /// 快门速度表（u16 | 小数<<16；bit15=1 → 1/(u16+小数)，否则为秒值），1/8000s-30s。
+    /// 小数字节双粒度（2026-11-10 Mimo 抓包实锤 1/1.67=dec 0x43(0.67)、1/1.25=dec 0x19(0.25)）：
+    /// dec ≤9 按十分位（1.3s=0x03），dec ≥10 按百分位（0.67→1/1.67、0.25→1/1.25）
     public static let shutterSpeeds: [UInt32] = [
         0x9F40, 0x9900, 0x9388, 0x8FA0, 0x8C80, 0x89C4, 0x87D0, 0x8640, 0x84E2, 0x83E8,
         0x8320, 0x8280, 0x81F4, 0x8190, 0x8140, 0x80FA, 0x80C8, 0x80A0, 0x807D, 0x8064,
         0x8050, 0x803C, 0x8032, 0x8028, 0x801E, 0x8019, 0x8014, 0x800F, 0x5800C, 0x800A,
-        0x8008, 0x8005, 0x8004, 0x8003, 0x58002, 0x8002, 0x0001, 0x30001, 0x60001, 0x0002,
-        0x50002, 0x0003, 0x20003, 0x0004, 0x0005, 0x0006, 0x0008, 0x000A, 0x000F, 0x0014, 0x001E,
+        0x8008, 0x8005, 0x8004, 0x8003, 0x58002, 0x8002, 0x438001, 0x198001,
+        0x0001, 0x30001, 0x60001, 0x0002,
+        0x50002, 0x0003, 0x20003, 0x0004, 0x0005, 0x0006, 0x0007, 0x0008, 0x0009, 0x000A,
+        0x000D, 0x000F, 0x0014, 0x0019, 0x001E,
     ]
+
+    /// 小数字节 → 小数（双粒度：≤9 十分位，≥10 百分位）
+    static func shutterFraction(_ dec: UInt32) -> Double {
+        let d = Double(dec)
+        return d >= 10 ? d / 100 : d / 10
+    }
+
+    /// 快门显示（官方 Mimo 同款）：分数形式 "1/x s"；秒形式 <1s 显示为 1/x，≥1s 显示秒
+    public static func shutterText(raw: UInt32) -> String {
+        let u16 = UInt16(truncatingIfNeeded: raw)
+        let decimal = (raw >> 16) & 0xFF
+        if u16 & 0x8000 != 0 {
+            let x = Double(u16 & 0x7FFF) + shutterFraction(decimal)
+            let txt = x == x.rounded() ? String(Int(x)) : String(format: "%.2f", x)
+            return "1/\(txt) s"
+        }
+        let s = Double(u16) + shutterFraction(decimal)
+        if s > 0, s < 1 {
+            let inv = 1 / s
+            let txt = inv == inv.rounded() ? String(Int(inv)) : String(format: "%.2f", inv)
+            return "1/\(txt) s"
+        }
+        return decimal == 0 ? "\(Int(s)) s" : String(format: "%.1f s", s)
+    }
 
     /// 快门载荷 `02/28 [01, u16 LE, 十分位, 00, 00, 00]`
     public static func shutterPayload(raw: UInt32) -> Data {
@@ -125,15 +153,24 @@ public enum OSMOA4 {
         return d
     }
 
-    /// EV 补偿：10 + 三分之一档（-3EV…0…+3EV，仅自动曝光）
-    public static let evSteps: [UInt8] = Array(UInt8(0x07)...UInt8(0x13))
+    /// 快门原始码对应的实际曝光时长（秒）；无法解析返回 nil
+    public static func shutterSeconds(raw: UInt32) -> Double? {
+        let u16 = UInt16(truncatingIfNeeded: raw)
+        let v = Double(u16 & 0x7FFF) + shutterFraction((raw >> 16) & 0xFF)
+        guard v > 0 else { return nil }
+        return u16 & 0x8000 != 0 ? 1 / v : v
+    }
+
+    /// EV 补偿：单字节码 07h–19h（十进制 7–25），码 16(10h)=0EV，每码 1/3EV，共 19 档。
+    /// 2026-11-09 抓包实锤：SET 序列 08→19h 对应 -2⅔→+3；-3(码07) 为默认值未下发。
+    /// 显示枚举：统一一位小数补零（"-3.0"/"+0.0"/"+2.7"），等宽字体右对齐展示
+    public static let evSteps: [UInt8] = Array(UInt8(0x07)...UInt8(0x19))
     public static func evName(_ v: UInt8) -> String {
-        let thirds = Int(v) - 10
-        if thirds == 0 { return "0" }
+        let thirds = Int(v) - 16          // 码 16 = 0EV
         let sign = thirds < 0 ? "-" : "+"
         let a = abs(thirds)
-        let frac = a % 3 == 1 ? "⅓" : a % 3 == 2 ? "⅔" : ""
-        return a / 3 == 0 ? "\(sign)\(frac)" : "\(sign)\(a / 3)\(frac)"
+        let tenth = a % 3 == 1 ? "3" : a % 3 == 2 ? "7" : "0"
+        return "\(sign)\(a / 3).\(tenth)"
     }
 
     // MARK: 白平衡（02/2C [mode, kelvin/100, 00, 00, 00]）
@@ -147,8 +184,9 @@ public enum OSMOA4 {
 
     // MARK: 色彩 / 锐度 / 降噪
 
+    /// 色彩档位（OA4 实测：仅 普通 与 D-Log M(0x34) 两档）
     public static let colorModes: [(code: UInt8, name: String)] = [
-        (0x00, "Normal"), (0x3F, "Normal 10-bit"), (0x3D, "D-Log M"),
+        (0x00, "普通"), (0x34, "D-Log M"),
     ]
     public static let sharpnessRange: [Int8] = [-2, -1, 0, 1, 2]
     public static let denoiseRange: [Int8] = [-2, -1, 0, 1]
@@ -157,21 +195,38 @@ public enum OSMOA4 {
 
     public static let paramFOV: UInt16 = 0x0009
     public static let paramEIS: UInt16 = 0x0008
+    /// Pro 模式开关（2026-11-09 官方 Mimo 抓包实锤：SET 01 01 0000 01 01 = 开启，
+    /// 唯一 SET 且位于模式切换后/EV 调整前；关闭 val=00 已真机实测）
+    public static let paramPro: UInt16 = 0x0000
+    /// auto 曝光下的 ISO 上限（同包实锤：SET 序列 07→05→02 对应 12800→1600→200，
+    /// 初始回读 val=08=12800；码表比主 ISO 表（03=100）偏移 -2）
+    public static let paramISOMax: UInt16 = 0x000F
+    /// 弱光增稳开关（2026-11-10 官方 Mimo 抓包实锤：4 次开关操作 → SET 01/00/01/00 交替，
+    /// 全程唯一 SET 序列；ACK 单字节 00。仅视频模式）
+    public static let paramLowLight: UInt16 = 0x0030
     /// 视角（FOV，02/8E 参数 0x0009）。OA4 码表经官方 Mimo 抓包实锤
     /// （zoom-capture-20261108：SET 序列 标准=02 → 广角=01 → 标准=02 → 窄=03，2026-11-08）。
     /// 值域按模式约束：视频模式仅 窄(03) / 标准·畸变校正(02)；其他模式仅 标准·畸变校正(02) / 广角(01)。
     public static let fovModes: [(code: UInt8, name: String)] = [
-        (0x01, "广角"), (0x02, "标准（畸变校正）"), (0x03, "窄"),
+        (0x00, "超广"), (0x01, "广角"), (0x02, "标准（畸变校正）"), (0x03, "窄"),
     ]
     public static let eisModes: [(code: UInt8, name: String)] = [
-        (0x00, "关闭"), (0x01, "RockSteady"), (0x02, "HorizonSteady"),
-        (0x03, "RockSteady+"), (0x04, "HorizonBalancing"),
+        (0x00, "关闭"), (0x01, "超强增稳"), (0x03, "超强增稳+"),
+        (0x02, "地平线增稳"), (0x04, "地平矫正"),
     ]
     public static func fovName(_ code: UInt8) -> String? {
         fovModes.first { $0.code == code }?.name
     }
     public static func eisName(_ code: UInt8) -> String? {
         eisModes.first { $0.code == code }?.name
+    }
+    /// ISO 上限码表（02/8E pid 0x000F；01=100 保留，值域从 200 起）
+    public static let isoMaxSteps: [(code: UInt8, name: String)] = [
+        (0x02, "200"), (0x03, "400"), (0x04, "800"), (0x05, "1600"),
+        (0x06, "3200"), (0x07, "6400"), (0x08, "12800"),
+    ]
+    public static func isoMaxName(_ code: UInt8) -> String? {
+        isoMaxSteps.first { $0.code == code }?.name
     }
     /// 写参数：`01 01 <type u16 LE> 01 <value>`
     public static func parameterSetPayload(type: UInt16, value: UInt8) -> Data {
@@ -315,6 +370,24 @@ public extension OSMOCameraLink {
         _ = try await request(cmdSet: 0x02, cmdId: 0x8E,
                               payload: OSMOA4.parameterSetPayload(type: OSMOA4.paramEIS, value: code),
                               timeout: 4)
+    }
+    /// 通用参数写（02/8E SET）
+    func writeParameter(type: UInt16, value: UInt8) async throws {
+        _ = try await request(cmdSet: 0x02, cmdId: 0x8E,
+                              payload: OSMOA4.parameterSetPayload(type: type, value: value),
+                              timeout: 4)
+    }
+    /// Pro 模式开关（02/8E pid 0x0000；01 开 / 00 关）
+    func setPro(_ enabled: Bool) async throws {
+        try await writeParameter(type: OSMOA4.paramPro, value: enabled ? 0x01 : 0x00)
+    }
+    /// ISO 上限（02/8E pid 0x000F，仅自动曝光下有意义）
+    func setISOMax(_ code: UInt8) async throws {
+        try await writeParameter(type: OSMOA4.paramISOMax, value: code)
+    }
+    /// 弱光增稳（02/8E pid 0x0030；01 开 / 00 关，仅视频模式）
+    func setLowLight(_ enabled: Bool) async throws {
+        try await writeParameter(type: OSMOA4.paramLowLight, value: enabled ? 0x01 : 0x00)
     }
     /// 读回 02/8E 参数（FOV/EIS 当前值；应答值在 [6]）
     func readParameter(type: UInt16) async throws -> UInt8? {

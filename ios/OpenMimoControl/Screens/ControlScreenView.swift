@@ -1,5 +1,6 @@
 import SwiftUI
 import OpenMimoProtocol
+import AudioToolbox
 
 // MARK: - 控制主界面（设计稿 ④—⑧：顶部两行状态 + 固定预览卡 + 参数平铺面板 + 底部三键操作栏；
 // 相机状态详情/断开收进顶部状态区弹窗，模式选择为底部弹窗。命令层复用 ConnectionFlow/OSMOA4 不变）
@@ -20,6 +21,219 @@ struct ControlScreenView: View {
     @State private var lastMoveAt: Date = .distantPast
     @State private var lastZoomSentAt: Date = .distantPast
     @State private var toast: String?
+    /// 取景网格模式（App 端叠加，本地记忆）：0 关闭 / 1 网格线 / 2 网格线和对角线
+    @AppStorage("preview.grid") private var gridMode = 0
+    /// Pro 模式本地即时覆盖（SET 成功后先行展开；回读 pid 0x0000 到达后以快照为准）
+    @State private var proOverride: Bool?
+    /// Pro 生效状态：优先本地覆盖，否则相机回读（pid 0x0000）
+    private var proOn: Bool { proOverride ?? (st.proOnCode == 1) }
+    /// 图像调节模式（本地记忆门控锐度/降噪）：0 默认 / 1 人像 / 2 自定义
+    @AppStorage("image.tune") private var imageTune = 0
+    static let imageTuneModes = ["默认", "人像", "自定义"]
+    /// 弱光增稳本地即时覆盖（SET 成功后先行显示；回读 pid 0x0030 到达后以快照为准）
+    @State private var lowLightOverride: Bool?
+    /// 系统滚轮逐档反馈：选择震动 + 系统 tick 音效
+    private func selectionFeedback() {
+        UISelectionFeedbackGenerator().selectionChanged()
+        AudioServicesPlaySystemSound(1104)
+    }
+
+    /// EV 滚动中的本地草稿（显示优先于回读；关闭滚轮后交还回读）
+    @State private var evDraft: UInt8?
+    @State private var lastEVSentAt: Date = .distantPast
+    /// EV 滚轮弹窗（长按 EV 控制项触发）
+    @State private var showEVDial = false
+
+    /// Picker 选中项绑定：滚动跨档即震动 + 音效 + 节流下发
+    private var evPickerBinding: Binding<UInt8> {
+        Binding(get: { evDraft ?? st.expoCompValue ?? 16 },
+                set: { new in
+                    guard new != evDraft else { return }
+                    evDraft = new
+                    selectionFeedback()
+                    throttledEV(new)
+                })
+    }
+
+    /// 变焦滚轮草稿（0.1x 步进码 ×10；显示优先于回读，关闭后交还回读）
+    @State private var zoomDraft: UInt16?
+    @State private var lastZoomDialSentAt: Date = .distantPast
+
+    private var zoomPickerBinding: Binding<UInt16> {
+        Binding(get: { zoomDraft ?? UInt16((displayZoom * 10).rounded()) },
+                set: { new in
+                    guard new != zoomDraft else { return }
+                    zoomDraft = new
+                    selectionFeedback()
+                    throttledZoomDial(new)
+                })
+    }
+
+    /// 当前量程下的滚轮档位（0.1x 步进码：拍照 10…40 / 视频 10…20）
+    private var zoomDialCodes: [UInt16] {
+        guard let range = zoomRange else { return [] }
+        return Array(UInt16((range.lowerBound * 10).rounded())...UInt16((range.upperBound * 10).rounded()))
+    }
+
+    /// 通用滚轮弹窗上下文（选项 ≥5 的控制项点击弹出）
+    @State private var wheelSheetCtx: WheelSheetContext?
+
+    /// 长档位控制项：选项 ≥6 时点击弹出滚轮弹窗，其余保持 Menu 交互不变；
+    /// live=false 的格式类滚轮仅在关闭时下发（命令会重启编码器）
+    @ViewBuilder
+    private func pillWheelRow(_ title: String, current: String?, options: [String],
+                              initialIndex: Int? = nil,
+                              disabled: Bool = false,
+                              live: Bool = true, rowWidth: CGFloat = 60,
+                              onPick: @escaping (Int) -> Void,
+                              onClose: (() -> Void)? = nil) -> some View {
+        if options.count < 6 {
+            pillRow(title, current: current, options: options, disabled: disabled) { i in
+                onPick(i)
+                await MainActor.run { flow.refreshOSMOQueries() }
+            }
+        } else {
+            let idx = initialIndex ?? (options.firstIndex(of: current ?? "") ?? 0)
+            HStack(spacing: 6) {
+            Text(title)
+                .font(.system(size: 13))
+                .foregroundStyle(OC.textSecondary)
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            HStack(spacing: 3) {
+                Text(current ?? "—")
+                    .font(.system(size: 13, weight: .medium).monospacedDigit())
+                    .foregroundStyle(disabled ? OC.textTertiary : OC.textPrimary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 9))
+                    .foregroundStyle(OC.textSecondary)
+            }
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 6)
+        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 44)
+        .background(RoundedRectangle(cornerRadius: 8).fill(OC.pill))
+        .contentShape(RoundedRectangle(cornerRadius: 8))
+        .disabled(disabled)
+        .opacity(disabled ? 0.45 : 1)
+        .onTapGesture {
+            guard !disabled else { return }   // 禁用态点击无反应（.disabled 不拦截后挂手势）
+            wheelSheetCtx = WheelSheetContext(title: title, options: options,
+                                              initialIndex: idx, live: live, rowWidth: rowWidth,
+                                              onPick: onPick, onClose: onClose)
+        }
+        }
+    }
+
+    /// 滚轮跨档节流下发（150ms，与捏合变焦同节奏）
+    private func throttledZoomDial(_ code: UInt16) {
+        guard Date().timeIntervalSince(lastZoomDialSentAt) > 0.15 else { return }
+        lastZoomDialSentAt = Date()
+        Task { await flow.setZoomPosition(Double(code) / 10) }
+    }
+
+    /// 收起变焦滚轮：当前档直发 + 回读校准 + 清草稿
+    private func zoomClose() {
+        let final = zoomDraft ?? UInt16((displayZoom * 10).rounded())
+        Task {
+            await flow.setZoomPosition(Double(final) / 10)
+            await MainActor.run {
+                zoomDraft = nil
+                flow.refreshOSMOQueries()
+            }
+        }
+    }
+
+    /// EV 拖动跨档节流下发（200ms）
+    private func throttledEV(_ code: UInt8) {
+        guard Date().timeIntervalSince(lastEVSentAt) > 0.2 else { return }
+        lastEVSentAt = Date()
+        Task { await flow.osmoCommand("EV") { try await $0.setEV(code) } }
+    }
+
+    /// 松手最终档直发（防节流窗口吞尾档）+ 清草稿交给回读校准
+    private func evCommit(_ code: UInt8) {
+        Task {
+            let ok = await flow.osmoCommand("EV") { try await $0.setEV(code) }
+            if ok != nil {
+                await MainActor.run {
+                    evDraft = nil
+                    flow.refreshOSMOQueries()
+                }
+            }
+        }
+    }
+
+    /// 收起 EV 滚轮：当前档直发 + 回读校准 + 清草稿
+    private func evClose() {
+        let final = evDraft ?? st.expoCompValue ?? 16
+        Task {
+            let ok = await flow.osmoCommand("EV") { try await $0.setEV(final) }
+            if ok != nil {
+                await MainActor.run {
+                    evDraft = nil
+                    flow.refreshOSMOQueries()
+                }
+            }
+        }
+    }
+
+    /// EV 滚轮弹窗（底部弹出，系统 wheel 选择器 + 逐档震动/音效；下滑关闭）
+    private var evDialSheet: some View {
+        VStack(spacing: 8) {
+            Text("EV")
+                .font(.system(size: 17, weight: .bold))
+                .foregroundStyle(OC.textPrimary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Picker("EV", selection: evPickerBinding) {
+                ForEach(OSMOA4.evSteps, id: \.self) { code in
+                    Text(OSMOA4.evName(code))
+                        .font(.system(size: 16, weight: .medium).monospacedDigit())
+                        .frame(width: 60, alignment: .trailing)   // 滚轮行宽统一 60
+                        .tag(code)
+                }
+            }
+            .pickerStyle(.wheel)
+            .frame(height: 170)
+            .padding(.horizontal, -8)   // wheel 自带左右内边距，向外借齐弹窗边
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 12)
+        .padding(.bottom, 8)
+        .background(OC.card, ignoresSafeAreaEdges: .bottom)
+        .presentationDetents([.height(220)])
+        .presentationDragIndicator(.hidden)
+    }
+
+    /// EV 控制项：点击弹出底部滚轮弹窗（19 档超出系统 Menu 可选范围）
+    @ViewBuilder
+    private var evPill: some View {
+        HStack(spacing: 6) {
+            Text("EV")
+                .font(.system(size: 13))
+                .foregroundStyle(OC.textSecondary)
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            HStack(spacing: 3) {
+                Text((evDraft ?? st.expoCompValue).map { OSMOA4.evName($0) } ?? "—")
+                    .font(.system(size: 13, weight: .medium).monospacedDigit())
+                    .foregroundStyle(OC.textPrimary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 9))
+                    .foregroundStyle(OC.textSecondary)
+            }
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 6)
+        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 44)
+        .background(RoundedRectangle(cornerRadius: 8).fill(OC.pill))
+        .contentShape(RoundedRectangle(cornerRadius: 8))
+        .onTapGesture { showEVDial = true }
+    }
     @State private var liveNotice: String?
     @State private var recBlinkInited = false
 
@@ -49,10 +263,12 @@ struct ControlScreenView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(OC.bg.ignoresSafeArea())
         .safeAreaInset(edge: .bottom) { bottomBar }
+        .sheet(item: $wheelSheetCtx) { ctx in WheelSheetView(ctx: ctx) }
+        .sheet(isPresented: $showEVDial, onDismiss: { evClose() }) { evDialSheet }
         .ocToast($toast)
         .sheet(isPresented: $showDetail) { detailSheet }
         .sheet(isPresented: $showModeSheet) { modeSheet }
-        .sheet(isPresented: $showZoomSlider) { zoomSliderSheet }
+        .sheet(isPresented: $showZoomSlider, onDismiss: { zoomClose() }) { zoomSliderSheet }
         .onChange(of: flow.osmoStatus.captureMode) { _ in
             // 模式切换后变焦量程变化（视频 1x–2x），钳制当前值
             if let range = zoomRange, zoomLevel > range.upperBound { zoomLevel = range.upperBound }
@@ -142,10 +358,20 @@ struct ControlScreenView: View {
                 .frame(height: previewHeight)
                 .frame(maxWidth: .infinity)
                 .clipShape(RoundedRectangle(cornerRadius: 14))
+            if gridMode >= 1 {
+                FramingGridOverlay(mode: gridMode)
+                    .frame(height: previewHeight)
+                    .frame(maxWidth: .infinity)
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
+            }
             if st.recordState == 2 {
                 RecBadge(seconds: st.clipSeconds ?? 0)
                     .padding(8)
             }
+        }
+        // 倍率角标用 overlay（不参与 ZStack sizing）——此前作为 maxHeight:.infinity 的
+        // ZStack 子视图，变焦 >1x 时会把预览卡撑满剩余空间、面板整体下移
+        .overlay(alignment: .topTrailing) {
             if displayZoom > 1.01 {
                 Text(String(format: "%.1fx", displayZoom))
                     .font(.system(size: 11, weight: .medium).monospacedDigit())
@@ -154,7 +380,6 @@ struct ControlScreenView: View {
                     .padding(.vertical, 4)
                     .background(Capsule().fill(Color.black.opacity(0.55)))
                     .padding(8)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
             }
         }
         .simultaneousGesture(MagnifyGesture()
@@ -183,57 +408,54 @@ struct ControlScreenView: View {
             zoomLevel = displayZoom   // 弹出时以相机实际倍率为轮盘基准
             showZoomSlider = true
         } label: {
-            HStack(spacing: 6) {
-                Text("变焦")
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(OC.textSecondary)
-                Spacer(minLength: 4)
-                HStack(spacing: 4) {
-                    Text(String(format: "%.1fx", displayZoom))
-                        .font(.system(size: 11.5, weight: .medium).monospacedDigit())
-                        .foregroundStyle(OC.textPrimary)
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 8))
+                HStack(spacing: 6) {
+                    Text("变焦")
+                        .font(.system(size: 13))
                         .foregroundStyle(OC.textSecondary)
+                    Spacer(minLength: 4)
+                    HStack(spacing: 4) {
+                        Text(String(format: "%.1fx", displayZoom))
+                            .font(.system(size: 13, weight: .medium).monospacedDigit())
+                            .foregroundStyle(OC.textPrimary)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 9))
+                            .foregroundStyle(OC.textSecondary)
+                    }
                 }
-            }
-            .padding(.horizontal, 9)
-            .padding(.vertical, 8)
+                .padding(.horizontal, 11)
+                .padding(.vertical, 6)
+                .frame(minWidth: 0, maxWidth: .infinity, minHeight: 44)
             .background(RoundedRectangle(cornerRadius: 8).fill(OC.pill))
+            .contentShape(RoundedRectangle(cornerRadius: 8))
         }
         .buttonStyle(.plain)
     }
 
     /// 变焦轮盘弹窗（0.1x 刻度 + 整数焦段磁吸；拍照 1.0–4.0 / 视频 1.0–2.0）
+    /// 变焦滚轮弹窗（底部弹出，系统 wheel + 逐档震动/音效；量程按模式：拍照 1.0–4.0 / 视频 1.0–2.0；下滑关闭）
     private var zoomSliderSheet: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Text("变焦")
-                    .font(.headline)
-                    .foregroundStyle(OC.textPrimary)
-                Spacer()
-                Button {
-                    showZoomSlider = false
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 22))
-                        .foregroundStyle(OC.textTertiary)
+        VStack(spacing: 8) {
+            Text("变焦")
+                .font(.system(size: 17, weight: .bold))
+                .foregroundStyle(OC.textPrimary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Picker("变焦", selection: zoomPickerBinding) {
+                ForEach(zoomDialCodes, id: \.self) { code in
+                    Text(String(format: "%.1fx", Double(code) / 10))
+                        .font(.system(size: 16, weight: .medium).monospacedDigit())
+                        .frame(width: 60, alignment: .trailing)   // 滚轮行宽统一 60
+                        .tag(code)
                 }
             }
-            ZoomWheelView(
-                range: zoomRange ?? 1.0...4.0,
-                snapPoints: (zoomRange?.upperBound ?? 4.0) <= 2.0 ? [1.0, 2.0] : [1.0, 2.0, 3.0, 4.0],
-                value: $zoomLevel,
-                onTickChange: { throttledZoomPosition($0) },
-                onCommit: { level in Task { await flow.setZoomPosition(level) } }
-            )
-            Spacer(minLength: 0)
+            .pickerStyle(.wheel)
+            .frame(height: 170)
+            .padding(.horizontal, -8)
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 16)
+        .padding(.top, 12)
+        .padding(.bottom, 8)
         .background(OC.card, ignoresSafeAreaEdges: .bottom)
-        .interactiveDismissDisabled(true)
-        .presentationDetents([.height(320)])
+        .presentationDetents([.height(220)])
         .presentationDragIndicator(.hidden)
     }
 
@@ -255,17 +477,18 @@ struct ControlScreenView: View {
     private var paramsPanel: some View {
         ScrollView(showsIndicators: false) {
             VStack(alignment: .leading, spacing: 4) {
-                if let range = zoomRange {
-                    groupLabel("变焦")
-                    zoomEntryButton(range)
+                groupLabel("通用设置")
+                pillGrid {
+                    videoPills
+                    photoRatioPill
+                    lapsePills
                 }
-                groupLabel("曝光")
-                pillGrid { exposurePills }
                 groupLabel("图像")
-                pillGrid { imagePills }
-                groupLabel("格式")
-                pillGrid { formatPills }
-                lapsePills
+                pillGrid {
+                    proPill
+                    exposurePills
+                    imagePills
+                }
             }
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -288,143 +511,49 @@ struct ControlScreenView: View {
         LazyVGrid(columns: [GridItem(.flexible(), spacing: 10),
                             GridItem(.flexible(), spacing: 10)],
                   alignment: .leading,
-                  spacing: 6) { pills() }
+                  spacing: 10) { pills() }   // 行距与列距一致
     }
 
-    /// 参数胶囊：Menu 选择器 + 回读值（specs「拍摄参数设置」：显示值来自回读，成功后 refresh 校准）
+    /// 参数胶囊：Menu 选择器 + 回读值（specs「拍摄参数设置」：显示值来自回读，成功后 refresh 校准）。
+    /// 整块胶囊都是 Menu label（触摸热区 = 整个 pill，≥44pt），点标题区与值区同样弹出选项
     private func pillRow(_ title: String, current: String?, options: [String],
                          disabled: Bool = false,
                          action: @escaping (Int) async -> Void) -> some View {
-        HStack(spacing: 6) {
-            Text(title)
-                .font(.system(size: 11.5))
-                .foregroundStyle(OC.textSecondary)
-                .lineLimit(1)
-            Spacer(minLength: 4)
-            Menu {
-                ForEach(options.indices, id: \.self) { i in
-                    Button(options[i]) { Task { await action(i) } }
-                }
-            } label: {
+        Menu {
+            ForEach(options.indices, id: \.self) { i in
+                Button(options[i]) { Task { await action(i) } }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(.system(size: 13))
+                    .foregroundStyle(OC.textSecondary)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
                 HStack(spacing: 3) {
                     Text(current ?? "—")
-                        .font(.system(size: 11.5, weight: .medium).monospacedDigit())
+                        .font(.system(size: 13, weight: .medium).monospacedDigit())
                         .foregroundStyle(disabled ? OC.textTertiary : OC.textPrimary)
                         .lineLimit(1)
                         .minimumScaleFactor(0.75)
                     Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 8))
+                        .font(.system(size: 9))
                         .foregroundStyle(OC.textSecondary)
                 }
             }
-            .disabled(disabled || flow.osmoBusy)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 6)
+            .frame(minWidth: 0, maxWidth: .infinity, minHeight: 44)
+            .background(RoundedRectangle(cornerRadius: 8).fill(OC.pill))
+            .contentShape(RoundedRectangle(cornerRadius: 8))
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 8)
-        .background(RoundedRectangle(cornerRadius: 8).fill(OC.pill))
+        .disabled(disabled || flow.osmoBusy)
     }
 
-    /// 曝光组（specs 表：02/1E 手动下才能设 ISO/快门；自动下才能设 EV——E3/DF 由相机裁决）
+    /// 通用设置组（优先级：分辨率/帧率 → 视角 → 变焦 → 电子增稳 → 弱光增稳 → 网格。
+    /// 慢动作模式以组合格式项替代分辨率/帧率；照片模式无分辨率/帧率）
     @ViewBuilder
-    private var exposurePills: some View {
-        let manual = st.exposureMode == 0x04
-        pillRow("曝光模式", current: st.exposureModeName,
-                options: ["自动", "手动"]) { i in
-            let ok = await flow.osmoCommand("曝光模式") { link in try await link.setExposureMode(auto: i == 0) }
-            if ok != nil {
-                await MainActor.run { flow.refreshOSMOQueries() }
-            }
-        }
-        pillRow("ISO", current: st.isoName,
-                options: ["自动"] + OSMOA4.isoCodes.map { "\($0.value)" },
-                disabled: !manual) { i in
-            let code = i == 0 ? UInt8(0) : OSMOA4.isoCodes[i - 1].code
-            let ok = await flow.osmoCommand("ISO") { link in try await link.setISO(code) }
-            if ok != nil {
-                await MainActor.run { flow.refreshOSMOQueries() }
-            }
-        }
-        pillRow("快门", current: st.shutterName,
-                options: OSMOA4.shutterSpeeds.map { Self.shutterText($0) },
-                disabled: !manual) { i in
-            let ok = await flow.osmoCommand("快门") { link in try await link.setShutter(raw: OSMOA4.shutterSpeeds[i]) }
-            if ok != nil {
-                await MainActor.run { flow.refreshOSMOQueries() }
-            }
-        }
-        pillRow("EV 补偿", current: st.expoCompName,
-                options: OSMOA4.evSteps.map { OSMOA4.evName($0) },
-                disabled: manual) { i in
-            let ok = await flow.osmoCommand("EV 补偿") { link in try await link.setEV(OSMOA4.evSteps[i]) }
-            if ok != nil {
-                await MainActor.run { flow.refreshOSMOQueries() }
-            }
-        }
-    }
-
-    /// 视角值域按模式约束（OA4，官方 Mimo 抓包实锤）：视频仅 窄(03)/标准（畸变校正）(02)；
-    /// 其他模式仅 标准（畸变校正）(02)/广角(01)
-    private var fovOptions: [(code: UInt8, name: String)] {
-        st.captureMode == OSMOA4.modeVideo
-            ? [(0x03, "窄"), (0x02, "标准（畸变校正）")]
-            : [(0x02, "标准（畸变校正）"), (0x01, "广角")]
-    }
-
-    /// 图像组（02/2C/42/38/44/8E×2；FOV 兼作视场角展示）
-    @ViewBuilder
-    private var imagePills: some View {
-        pillRow("白平衡", current: st.wbName,
-                options: ["自动"] + OSMOA4.wbKelvins.map { "\($0)K" }) { i in
-            let ok = await flow.osmoCommand("白平衡") { link in
-                try await link.setWhiteBalance(manual: i > 0,
-                                               kelvin: i > 0 ? OSMOA4.wbKelvins[i - 1] : 5600)
-            }
-            if ok != nil {
-                await MainActor.run { flow.refreshOSMOQueries() }
-            }
-        }
-        pillRow("色彩", current: st.colorProfileName,
-                options: OSMOA4.colorModes.map(\.name)) { i in
-            let ok = await flow.osmoCommand("色彩档位") { link in try await link.setColorProfile(OSMOA4.colorModes[i].code) }
-            if ok != nil {
-                await MainActor.run { flow.refreshOSMOQueries() }
-            }
-        }
-        pillRow("锐度", current: st.sharpness.map(String.init),
-                options: OSMOA4.sharpnessRange.map(String.init)) { i in
-            let ok = await flow.osmoCommand("锐度") { link in try await link.setSharpness(OSMOA4.sharpnessRange[i]) }
-            if ok != nil {
-                await MainActor.run { flow.refreshOSMOQueries() }
-            }
-        }
-        pillRow("降噪", current: st.denoise.map(String.init),
-                options: OSMOA4.denoiseRange.map(String.init)) { i in
-            let ok = await flow.osmoCommand("降噪") { link in try await link.setDenoise(OSMOA4.denoiseRange[i]) }
-            if ok != nil {
-                await MainActor.run { flow.refreshOSMOQueries() }
-            }
-        }
-        pillRow("视角", current: st.fovValue.flatMap { OSMOA4.fovName($0) },
-                options: fovOptions.map(\.name)) { i in
-            let codes = fovOptions.map(\.code)
-            guard i < codes.count else { return }
-            let ok = await flow.osmoCommand("视角") { link in try await link.setFOV(codes[i]) }
-            if ok != nil {
-                await MainActor.run { flow.refreshOSMOQueries() }
-            }
-        }
-        pillRow("防抖", current: st.eisValue.flatMap { OSMOA4.eisName($0) },
-                options: OSMOA4.eisModes.map(\.name)) { i in
-            let ok = await flow.osmoCommand("防抖") { link in try await link.setEIS(OSMOA4.eisModes[i].code) }
-            if ok != nil {
-                await MainActor.run { flow.refreshOSMOQueries() }
-            }
-        }
-    }
-
-    /// 格式组（02/18/02/12；慢动作展示 (分辨率,帧率,倍速) 组合；照片模式只有比例）
-    @ViewBuilder
-    private var formatPills: some View {
+    private var videoPills: some View {
         let mode = st.captureMode
         if mode == OSMOA4.modeSlowmo {
             pillRow("慢动作", current: slowmoCurrent,
@@ -436,85 +565,270 @@ struct ControlScreenView: View {
                 }
             }
         } else if mode != OSMOA4.modePhoto {
-            pillRow("分辨率", current: st.videoResolutionName,
-                    options: (OSMOA4.modeResolutions[mode ?? OSMOA4.modeVideo] ?? [])
-                        .compactMap { OSMOA4.resolutionNames[$0] }) { i in
-                let codes = OSMOA4.modeResolutions[mode ?? OSMOA4.modeVideo] ?? []
-                guard i < codes.count else { return }
-                let res = codes[i]
-                let fps = st.videoFpsCode ?? 3
-                _ = await flow.osmoFormatCommand("分辨率") { link in try await link.setVideoFormat(res: res, fps: fps) }
+            // 分辨率/帧率（格式类：live=false 滚轮仅关闭时下发；<6 档由 pillWheelRow 回退 Menu）
+            let resCodes = OSMOA4.modeResolutions[mode ?? OSMOA4.modeVideo] ?? []
+            let resOptions = resCodes.compactMap { OSMOA4.resolutionNames[$0] }
+            pillWheelRow("分辨率", current: st.videoResolutionName,
+                         options: resOptions,
+                         initialIndex: st.videoResolutionCode.flatMap { resCodes.firstIndex(of: $0) },
+                         live: false,
+                         onPick: { i in
+                             guard i < resCodes.count else { return }
+                             let res = resCodes[i]
+                             let fps = st.videoFpsCode ?? 3
+                             Task { _ = await flow.osmoFormatCommand("分辨率") { link in
+                                 try await link.setVideoFormat(res: res, fps: fps)
+                             } }
+                         },
+                         onClose: { flow.refreshOSMOQueries() })
+            let fpsCodes = OSMOA4.fpsOptions(mode: mode ?? OSMOA4.modeVideo,
+                                             res: st.videoResolutionCode ?? 0x0A)
+            let fpsOptionNames = fpsCodes.compactMap { OSMOA4.fpsNames[$0].map { "\($0)fps" } }
+            pillWheelRow("帧率", current: st.videoFpsName.map { "\($0)fps" },
+                         options: fpsOptionNames,
+                         initialIndex: st.videoFpsCode.flatMap { fpsCodes.firstIndex(of: $0) },
+                         live: false,
+                         onPick: { i in
+                             guard i < fpsCodes.count else { return }
+                             let res = st.videoResolutionCode ?? 0x0A
+                             Task { _ = await flow.osmoFormatCommand("帧率") { link in
+                                 try await link.setVideoFormat(res: res, fps: fpsCodes[i])
+                             } }
+                         },
+                         onClose: { flow.refreshOSMOQueries() })
+        }
+        pillRow("视角", current: st.fovValue.flatMap { OSMOA4.fovName($0) },
+                options: fovOptions.map(\.name)) { i in
+            let codes = fovOptions.map(\.code)
+            guard i < codes.count else { return }
+            let ok = await flow.osmoCommand("视角") { link in try await link.setFOV(codes[i]) }
+            if ok != nil {
+                await MainActor.run { flow.refreshOSMOQueries() }
             }
-            pillRow("帧率", current: st.videoFpsName.map { "\($0)fps" },
-                    options: OSMOA4.fpsOptions(mode: mode ?? OSMOA4.modeVideo,
-                                               res: st.videoResolutionCode ?? 0x0A)
-                        .compactMap { OSMOA4.fpsNames[$0].map { "\($0)fps" } }) { i in
-                let codes = OSMOA4.fpsOptions(mode: mode ?? OSMOA4.modeVideo,
-                                              res: st.videoResolutionCode ?? 0x0A)
-                guard i < codes.count else { return }
-                let res = st.videoResolutionCode ?? 0x0A
-                _ = await flow.osmoFormatCommand("帧率") { link in try await link.setVideoFormat(res: res, fps: codes[i]) }
+        }
+        if let range = zoomRange {
+            zoomEntryButton(range)
+        }
+        // 电子增稳仅视频模式（其他模式无增稳档位）
+        if mode == OSMOA4.modeVideo {
+            pillWheelRow("电子增稳", current: st.eisValue.flatMap { OSMOA4.eisName($0) },
+                         options: OSMOA4.eisModes.map(\.name),
+                         initialIndex: st.eisValue.flatMap { v in OSMOA4.eisModes.firstIndex { $0.code == v } },
+                         onPick: { i in
+                             guard i < OSMOA4.eisModes.count else { return }
+                             Task { _ = await flow.osmoCommand("电子增稳") { try await $0.setEIS(OSMOA4.eisModes[i].code) } }
+                         },
+                         onClose: { flow.refreshOSMOQueries() })
+        }
+        // 弱光增稳（02/8E pid 0x0030，2026-11-10 Mimo 抓包实锤；仅视频模式）
+        if mode == OSMOA4.modeVideo {
+            pillRow("弱光增稳", current: lowLightOverride.map { $0 ? "开启" : "关闭" }
+                        ?? (st.lowLightCode == 1 ? "开启" : st.lowLightCode == 0 ? "关闭" : nil),
+                    options: ["关闭", "开启"]) { i in
+                let on = i == 1
+                let ok = await flow.osmoCommand("弱光增稳") { link in try await link.setLowLight(on) }
+                if ok != nil {
+                    await MainActor.run {
+                        lowLightOverride = on            // 即时反馈；回读到达后对齐
+                        flow.refreshOSMOQueries()
+                    }
+                }
             }
-        } else {
-            pillRow("照片比例", current: st.photoRatioCode.map { $0 == 1 ? "16:9" : "4:3" },
-                    options: ["4:3", "16:9"]) { i in
-                _ = await flow.osmoFormatCommand("照片比例") { link in try await link.setPhotoFormat(size: 0, ratio: UInt8(i)) }
+        }
+        // 取景网格（官方 Mimo 即 App 端预览叠加，不向相机发送命令）
+        pillRow("网格", current: Self.gridModes[gridMode],
+                options: Self.gridModes) { i in
+            await MainActor.run { gridMode = i }
+        }
+    }
+
+    static let gridModes = ["关闭", "网格线", "网格线和对角线"]
+
+    /// PRO 开关（图像组首项；Pro 关闭时图像组仅此项）
+    @ViewBuilder
+    private var proPill: some View {
+        pillRow("PRO", current: proOn ? "开" : "关",
+                options: ["关", "开"]) { i in
+            let on = i == 1
+            let ok = await flow.osmoCommand("Pro 开关") { link in try await link.setPro(on) }
+            if ok != nil {
+                await MainActor.run {
+                    proOverride = on            // 立即展开/收起专业参数
+                    flow.refreshOSMOQueries()   // 回读 pid 0x0000 校准
+                }
             }
         }
     }
 
-    /// 延时组（02/6C 双形态；当前值来自 cam_lapse_param 回读）
+    /// 曝光组（Pro 开启时显示：曝光 → Shutter → ISO → ISO MAX；EV 用中心刻度条。
+    /// 02/1E 手动下才能设 ISO/快门；自动下才能设 ISO MAX）
+    @ViewBuilder
+    private var exposurePills: some View {
+        let manual = st.exposureMode == 0x04
+        if proOn {
+            pillRow("曝光", current: st.exposureModeName,
+                    options: ["自动", "手动"]) { i in
+                let ok = await flow.osmoCommand("曝光模式") { link in try await link.setExposureMode(auto: i == 0) }
+                if ok != nil {
+                    await MainActor.run { flow.refreshOSMOQueries() }
+                }
+            }
+            evPill
+            // 视频模式快门上限 1/25（官方约束）；自动曝光下回显相机自计算值（02/29 应答 DF，实际值来自 cam_expo_param）
+            let shutterRaws = st.captureMode == OSMOA4.modeVideo
+                ? OSMOA4.shutterSpeeds.filter { (OSMOA4.shutterSeconds(raw: $0) ?? 0) <= 1.0 / 25.0 + 1e-9 }
+                : OSMOA4.shutterSpeeds
+            pillWheelRow("快门", current: manual ? st.shutterName : (st.effectiveShutterName ?? st.shutterName),
+                         options: shutterRaws.map { OSMOA4.shutterText(raw: $0) },
+                         initialIndex: st.shutterRaw.flatMap { shutterRaws.firstIndex(of: $0) },
+                         disabled: !manual,
+                         onPick: { i in
+                             guard i < shutterRaws.count else { return }
+                             Task { _ = await flow.osmoCommand("快门") { try await $0.setShutter(raw: shutterRaws[i]) } }
+                         },
+                         onClose: { flow.refreshOSMOQueries() })
+            pillWheelRow("ISO", current: manual ? st.isoName : (st.effectiveISOName ?? st.isoName),
+                         options: ["自动"] + OSMOA4.isoCodes.map { "\($0.value)" },
+                         initialIndex: st.isoCode.flatMap { c in
+                             c == 0 ? 0 : OSMOA4.isoCodes.firstIndex { $0.code == c }.map { $0 + 1 }
+                         },
+                         disabled: !manual,
+                         onPick: { i in
+                             let code = i == 0 ? UInt8(0) : OSMOA4.isoCodes[i - 1].code
+                             Task { _ = await flow.osmoCommand("ISO") { try await $0.setISO(code) } }
+                         },
+                         onClose: { flow.refreshOSMOQueries() })
+            // ISO 上限（02/8E pid 0x000F；手动曝光下同样可调）
+            pillWheelRow("ISO MAX", current: st.isoMaxCode.flatMap { OSMOA4.isoMaxName($0) },
+                         options: OSMOA4.isoMaxSteps.map(\.name),
+                         initialIndex: st.isoMaxCode.flatMap { c in OSMOA4.isoMaxSteps.firstIndex { $0.code == c } },
+                         onPick: { i in
+                             guard i < OSMOA4.isoMaxSteps.count else { return }
+                             Task { _ = await flow.osmoCommand("ISO MAX") { try await $0.setISOMax(OSMOA4.isoMaxSteps[i].code) } }
+                         },
+                         onClose: { flow.refreshOSMOQueries() })
+        }
+    }
+
+    /// 视角值域按模式约束（OA4）：视频模式 窄/标准/广角/超广（是否可选随分辨率与帧率变化，
+    /// 精确矩阵待实测——不可选时相机回 E3 拒绝并由回读校准）；其他模式 标准/广角
+    private var fovOptions: [(code: UInt8, name: String)] {
+        st.captureMode == OSMOA4.modeVideo
+            ? [(0x03, "窄"), (0x02, "标准（畸变校正）"), (0x01, "广角"), (0x00, "超广")]
+            : [(0x02, "标准（畸变校正）"), (0x01, "广角")]
+    }
+
+    /// 图像组（02/2C/42/38/44；视角/增稳已移入视频设置组）
+    @ViewBuilder
+    private var imagePills: some View {
+        pillWheelRow("白平衡", current: st.wbName,
+                     options: ["自动"] + OSMOA4.wbKelvins.map { "\($0)K" },
+                     initialIndex: st.wbMode == 0x00 ? 0
+                         : st.wbKelvin.flatMap { k in OSMOA4.wbKelvins.firstIndex(of: k) }.map { $0 + 1 },
+                     onPick: { i in
+                         let manual = i > 0
+                         let kelvin = i > 0 ? OSMOA4.wbKelvins[i - 1] : 5600
+                         Task { _ = await flow.osmoCommand("白平衡") { try await $0.setWhiteBalance(manual: manual, kelvin: kelvin) } }
+                     },
+                     onClose: { flow.refreshOSMOQueries() })
+        pillRow("色彩", current: st.colorProfileName,
+                options: OSMOA4.colorModes.map(\.name)) { i in
+            let ok = await flow.osmoCommand("色彩档位") { link in try await link.setColorProfile(OSMOA4.colorModes[i].code) }
+            if ok != nil {
+                await MainActor.run { flow.refreshOSMOQueries() }
+            }
+        }
+        // 图像调节（App 侧预设，无独立相机字段——三方文档 02/8E pid 表均无此概念。
+        // 实测映射：默认=锐度0/降噪0，人像=锐度0/降噪1，经 02/38+02/44 下发；自定义仅解锁手动调节）
+        pillRow("图像调节", current: Self.imageTuneModes[imageTune],
+                options: Self.imageTuneModes) { i in
+            await MainActor.run { imageTune = i }
+            guard i < 2 else { return }   // 自定义不改动当前值
+            let denoise: Int8 = i == 0 ? 0 : 1
+            let ok = await flow.osmoCommand("图像调节") { link in
+                try await link.setSharpness(0)
+                try await link.setDenoise(denoise)
+            }
+            if ok != nil {
+                await MainActor.run { flow.refreshOSMOQueries() }
+            }
+        }
+        pillRow("锐度", current: st.sharpness.map(String.init),
+                options: OSMOA4.sharpnessRange.map(String.init),
+                disabled: imageTune != 2) { i in
+            let ok = await flow.osmoCommand("锐度") { link in try await link.setSharpness(OSMOA4.sharpnessRange[i]) }
+            if ok != nil {
+                await MainActor.run { flow.refreshOSMOQueries() }
+            }
+        }
+        pillRow("降噪", current: st.denoise.map(String.init),
+                options: OSMOA4.denoiseRange.map(String.init),
+                disabled: imageTune != 2) { i in
+            let ok = await flow.osmoCommand("降噪") { link in try await link.setDenoise(OSMOA4.denoiseRange[i]) }
+            if ok != nil {
+                await MainActor.run { flow.refreshOSMOQueries() }
+            }
+        }
+    }
+
+    /// 画幅（仅照片模式；通用设置组）
+    @ViewBuilder
+    private var photoRatioPill: some View {
+        if st.captureMode == OSMOA4.modePhoto {
+            pillRow("画幅", current: st.photoRatioCode.map { $0 == 1 ? "16:9" : "4:3" },
+                    options: ["4:3", "16:9"]) { i in
+                _ = await flow.osmoFormatCommand("画幅") { link in try await link.setPhotoFormat(size: 0, ratio: UInt8(i)) }
+            }
+        }
+    }
+
+    /// 延时/运动延时（02/6C 双形态；平铺进通用设置组两列网格；当前值来自 cam_lapse_param 回读）
     @ViewBuilder
     private var lapsePills: some View {
         if st.captureMode == OSMOA4.modeTimelapse {
-            groupLabel("延时")
-            pillGrid {
-                pillRow("延时间隔", current: st.lapseIntervalDeciS.map { Self.intervalText($0) },
-                        options: OSMOA4.timelapseIntervalsTenths.map { Self.intervalText($0) }) { i in
-                    let ok = await flow.osmoCommand("延时间隔") { link in
-                        try await link.setTimelapse(save: st.lapseKeep ?? 0,
-                                                    intervalTenths: OSMOA4.timelapseIntervalsTenths[i],
-                                                    durationS: st.lapseDurationS ?? 0)
-                    }
-                    if ok != nil {
-                        await MainActor.run { flow.refreshOSMOQueries() }
-                    }
+            pillWheelRow("延时间隔", current: st.lapseIntervalDeciS.map { Self.intervalText($0) },
+                         options: OSMOA4.timelapseIntervalsTenths.map { Self.intervalText($0) },
+                         initialIndex: st.lapseIntervalDeciS.flatMap { v in OSMOA4.timelapseIntervalsTenths.firstIndex(of: v) },
+                         onPick: { i in
+                             guard i < OSMOA4.timelapseIntervalsTenths.count else { return }
+                             let keep = st.lapseKeep ?? 0
+                             let dur = st.lapseDurationS ?? 0
+                             Task { _ = await flow.osmoCommand("延时间隔") { try await $0.setTimelapse(save: keep,
+                                 intervalTenths: OSMOA4.timelapseIntervalsTenths[i], durationS: dur) } }
+                         },
+                         onClose: { flow.refreshOSMOQueries() })
+            pillWheelRow("拍摄时长", current: st.lapseDurationS.map { $0 == 0 ? "不限" : "\(Int($0) / 60)分" },
+                         options: OSMOA4.timelapseDurationsS.map { $0 == 0 ? "不限" : "\(Int($0) / 60)分" },
+                         initialIndex: st.lapseDurationS.flatMap { v in OSMOA4.timelapseDurationsS.firstIndex(of: v) },
+                         onPick: { i in
+                             guard i < OSMOA4.timelapseDurationsS.count else { return }
+                             let keep = st.lapseKeep ?? 0
+                             let interval = st.lapseIntervalDeciS ?? 20
+                             Task { _ = await flow.osmoCommand("拍摄时长") { try await $0.setTimelapse(save: keep,
+                                 intervalTenths: interval, durationS: OSMOA4.timelapseDurationsS[i]) } }
+                         },
+                         onClose: { flow.refreshOSMOQueries() })
+            pillRow("保存", current: st.lapseKeep.flatMap { keep in
+                OSMOA4.lapseSaveModes.first { $0.code == keep }?.name
+            }, options: OSMOA4.lapseSaveModes.map(\.name)) { i in
+                let ok = await flow.osmoCommand("延时保存") { link in
+                    try await link.setTimelapse(save: OSMOA4.lapseSaveModes[i].code,
+                                                intervalTenths: st.lapseIntervalDeciS ?? 20,
+                                                durationS: st.lapseDurationS ?? 0)
                 }
-                pillRow("延时长度", current: st.lapseDurationS.map { $0 == 0 ? "不限" : "\(Int($0) / 60)分" },
-                        options: OSMOA4.timelapseDurationsS.map { $0 == 0 ? "不限" : "\(Int($0) / 60)分" }) { i in
-                    let ok = await flow.osmoCommand("延时长度") { link in
-                        try await link.setTimelapse(save: st.lapseKeep ?? 0,
-                                                    intervalTenths: st.lapseIntervalDeciS ?? 20,
-                                                    durationS: OSMOA4.timelapseDurationsS[i])
-                    }
-                    if ok != nil {
-                        await MainActor.run { flow.refreshOSMOQueries() }
-                    }
-                }
-                pillRow("保存", current: st.lapseKeep.flatMap { keep in
-                    OSMOA4.lapseSaveModes.first { $0.code == keep }?.name
-                }, options: OSMOA4.lapseSaveModes.map(\.name)) { i in
-                    let ok = await flow.osmoCommand("延时保存") { link in
-                        try await link.setTimelapse(save: OSMOA4.lapseSaveModes[i].code,
-                                                    intervalTenths: st.lapseIntervalDeciS ?? 20,
-                                                    durationS: st.lapseDurationS ?? 0)
-                    }
-                    if ok != nil {
-                        await MainActor.run { flow.refreshOSMOQueries() }
-                    }
+                if ok != nil {
+                    await MainActor.run { flow.refreshOSMOQueries() }
                 }
             }
         } else if st.captureMode == OSMOA4.modeHyperlapse {
-            groupLabel("运动延时")
-            pillGrid {
-                pillRow("速度", current: st.lapseSpeed.map { $0 == 0 ? "自动" : "\($0)×" },
-                        options: OSMOA4.hyperlapseSpeeds.map { $0 == 0 ? "自动" : "\($0)×" }) { i in
-                    let ok = await flow.osmoCommand("运动延时速度") { link in try await link.setHyperlapseSpeed(OSMOA4.hyperlapseSpeeds[i]) }
-                    if ok != nil {
-                        await MainActor.run { flow.refreshOSMOQueries() }
-                    }
-                }
-            }
+            pillWheelRow("延时速率", current: st.lapseSpeed.map { $0 == 0 ? "自动" : "\($0)×" },
+                         options: OSMOA4.hyperlapseSpeeds.map { $0 == 0 ? "自动" : "\($0)×" },
+                         initialIndex: st.lapseSpeed.flatMap { v in OSMOA4.hyperlapseSpeeds.firstIndex(of: v) },
+                         onPick: { i in
+                             guard i < OSMOA4.hyperlapseSpeeds.count else { return }
+                             Task { _ = await flow.osmoCommand("延时速率") { try await $0.setHyperlapseSpeed(OSMOA4.hyperlapseSpeeds[i]) } }
+                         },
+                         onClose: { flow.refreshOSMOQueries() })
         }
     }
 
@@ -534,15 +848,7 @@ struct ControlScreenView: View {
     }
 
     private static func shutterText(_ raw: UInt32) -> String {
-        let u16 = UInt16(truncatingIfNeeded: raw)
-        let decimal = Int((raw >> 16) & 0xFF)
-        if u16 & 0x8000 != 0 {
-            let x = Double(u16 & 0x7FFF) + Double(decimal) / 10
-            let txt = x == x.rounded() ? String(Int(x)) : String(format: "%.1f", x)
-            return "1/\(txt) s"
-        }
-        let s = Double(u16) + Double(decimal) / 10
-        return decimal == 0 ? "\(Int(s)) s" : String(format: "%.1f s", s)
+        OSMOA4.shutterText(raw: raw)   // 统一显示（含 <1s → 1/x 形式）
     }
 
     // MARK: 底部操作栏（左素材浏览 / 中快门 / 右录制模式图标，固定页面底部）
@@ -836,5 +1142,70 @@ struct ControlScreenView: View {
         let f = DateFormatter()
         f.dateFormat = "HH:mm:ss"
         return f.string(from: d)
+    }
+}
+
+/// 长档位滚轮弹窗上下文（选项 ≥5 的控制项；EV/变焦有专属实现，不走此通用通道）
+private struct WheelSheetContext: Identifiable {
+    let id = UUID()
+    let title: String
+    let options: [String]
+    let initialIndex: Int
+    /// true：滚动跨档即下发（200ms 节流）；false：仅关闭时下发（格式类命令会重启编码器）
+    let live: Bool
+    let rowWidth: CGFloat
+    let onPick: (Int) -> Void
+    let onClose: (() -> Void)?
+}
+
+/// 滚轮弹窗视图（系统 wheel + 逐档震动/音效；关闭必发一次最终选择 + 回读校准）
+private struct WheelSheetView: View {
+    let ctx: WheelSheetContext
+    @State private var index: Int
+    @State private var lastSent = Date.distantPast
+    private let selectionHaptic = UISelectionFeedbackGenerator()
+
+    init(ctx: WheelSheetContext) {
+        self.ctx = ctx
+        _index = State(initialValue: min(max(ctx.initialIndex, 0), max(ctx.options.count - 1, 0)))
+    }
+
+    var body: some View {
+        VStack(spacing: 8) {
+            Text(ctx.title)
+                .font(.system(size: 17, weight: .bold))
+                .foregroundStyle(OC.textPrimary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Picker(ctx.title, selection: $index) {
+                ForEach(ctx.options.indices, id: \.self) { i in
+                    Text(ctx.options[i])
+                        .font(.system(size: 16, weight: .medium).monospacedDigit())
+                        .minimumScaleFactor(0.6)   // 长文本（1/8000 s）缩放收纳
+                        .lineLimit(1)
+                        .frame(width: ctx.rowWidth, alignment: .trailing)
+                        .tag(i)
+                }
+            }
+            .pickerStyle(.wheel)
+            .frame(height: 170)
+            .padding(.horizontal, -8)
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 12)
+        .padding(.bottom, 8)
+        .background(OC.card, ignoresSafeAreaEdges: .bottom)
+        .presentationDetents([.height(220)])
+        .presentationDragIndicator(.hidden)
+        .onChange(of: index) { i in
+            selectionHaptic.selectionChanged()
+            AudioServicesPlaySystemSound(1104)
+            guard ctx.live, Date().timeIntervalSince(lastSent) > 0.2 else { return }
+            lastSent = Date()
+            ctx.onPick(i)
+        }
+        .onDisappear {
+            ctx.onPick(index)
+            ctx.onClose?()
+        }
     }
 }

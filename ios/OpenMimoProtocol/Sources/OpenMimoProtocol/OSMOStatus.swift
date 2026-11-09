@@ -71,9 +71,15 @@ public struct OSMOStatusSnapshot: Equatable {
     /// 02/13 照片格式回读（照片模式才有；尺寸/比例）
     public var photoSizeCode: UInt8?
     public var photoRatioCode: UInt8?
-    /// 02/8E 参数回读（FOV 0x0009 / EIS 0x0008）
+    /// 02/8E 参数回读（FOV 0x0009 / EIS 0x0008 / ISO 上限 0x000F）
     public var fovValue: UInt8?
     public var eisValue: UInt8?
+    /// auto 曝光下的 ISO 上限（02/8E pid 0x000F 回读，码见 OSMOA4.isoMaxSteps）
+    public var isoMaxCode: UInt8?
+    /// 弱光增稳（02/8E pid 0x0030 回读：01 开 / 00 关）
+    public var lowLightCode: UInt8?
+    /// Pro 模式（02/8E pid 0x0000 回读：01 开 / 00 关；连接即查，控制专业参数显隐）
+    public var proOnCode: UInt8?
     /// 相机竖拍模式（cam_portrait_mode 主题，竖拍安装时用于预览方向矫正）
     public var portraitMode: Bool?
     /// 数码变焦倍率（cam_lens_state @14 ÷ 126；相机端变焦同步）
@@ -205,16 +211,26 @@ extension OSMOStatusSnapshot {
         return Self.formatShutter(u16: u16, decimal: 0)
     }
 
+    /// cam_expo_param 实际生效 ISO（自动曝光下相机自计算值）
+    public var effectiveISOName: String? {
+        effectiveISO.map { "\($0)" }
+    }
+
     private static func formatShutter(u16: UInt16, decimal: Int) -> String {
-        // osmocam §7.1：bit15=1 → 1/x 秒；否则整秒；decimal 是附加的十分位数字
-        // （0x8019+0=1/25s，0x800C+5=1/12.5s，0x0001+3=1.3s）
-        let digit = Double(decimal) / 10
+        // 小数字节双粒度（2026-11-10 抓包实锤）：≤9 十分位（0x800C+5=1/12.5s、0x0001+3=1.3s），
+        // ≥10 百分位（0x8001+0x43=1/1.67s、0x8001+0x19=1/1.25s）；<1s 显示为 1/x
+        let digit = OSMOA4.shutterFraction(UInt32(decimal))
         if u16 & 0x8000 != 0 {
             let x = Double(u16 & 0x7FFF) + digit
-            let txt = x == x.rounded() ? String(Int(x)) : String(format: "%.1f", x)
+            let txt = x == x.rounded() ? String(Int(x)) : String(format: "%.2f", x)
             return "1/\(txt) s"
         }
         let s = Double(u16) + digit
+        if s > 0, s < 1 {
+            let inv = 1 / s
+            let txt = inv == inv.rounded() ? String(Int(inv)) : String(format: "%.2f", inv)
+            return "1/\(txt) s"
+        }
         let txt = decimal == 0 ? String(Int(s)) : String(format: "%.1f", s)
         return "\(txt) s"
     }
@@ -228,25 +244,14 @@ extension OSMOStatusSnapshot {
         }
     }
 
-    /// EV 补偿/测光原始值 → "±N⅓ EV"（10=0，每档 1/3，范围 07…19）
+    /// EV 补偿显示（与菜单枚举同源 OSMOA4.evName：码 16=0EV，一位小数，零为 "+0"）
     public var expoCompName: String? {
-        Self.formatExpoValue(expoCompValue)
+        expoCompValue.map { OSMOA4.evName($0) }
     }
 
+    /// 测光偏离（同一编码；诊断面板附 " EV" 后缀）
     public var lightMeterName: String? {
-        Self.formatExpoValue(lightMeterValue)
-    }
-
-    static func formatExpoValue(_ v: UInt8?) -> String? {
-        guard let v else { return nil }
-        // v = 10 + 三分之一档：07=-3EV … 10=0 … 19=+3EV
-        let thirds = Int(v) - 10
-        if thirds == 0 { return "0 EV" }
-        let sign = thirds < 0 ? "-" : "+"
-        let a = abs(thirds)
-        let whole = a / 3
-        let frac = a % 3 == 1 ? "⅓" : a % 3 == 2 ? "⅔" : ""
-        return whole == 0 ? "\(sign)\(frac) EV" : "\(sign)\(whole)\(frac) EV"
+        lightMeterValue.map { OSMOA4.evName($0) + " EV" }
     }
 
     /// 白平衡名称
@@ -261,9 +266,8 @@ extension OSMOStatusSnapshot {
     /// 色彩档位（osmocam §7.5）
     public var colorProfileName: String? {
         switch colorProfile {
-        case 0x00: "Normal"
-        case 0x3F: "Normal 10-bit"
-        case 0x3D: "D-Log M"
+        case 0x00: "普通"
+        case 0x34: "D-Log M"
         case 0x3C: "HLG"
         case 0x17: "D-Log"
         case 0x41: "D-Log2"
@@ -539,6 +543,9 @@ public final class OSMOStatusTracker {
         switch type {
         case OSMOA4.paramFOV: snapshot.fovValue = p[6]
         case OSMOA4.paramEIS: snapshot.eisValue = p[6]
+        case OSMOA4.paramISOMax: snapshot.isoMaxCode = p[6]
+        case OSMOA4.paramLowLight: snapshot.lowLightCode = p[6]
+        case OSMOA4.paramPro: snapshot.proOnCode = p[6]
         default: break
         }
     }

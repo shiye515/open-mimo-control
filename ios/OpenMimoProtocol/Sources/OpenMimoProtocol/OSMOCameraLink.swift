@@ -629,6 +629,9 @@ public final class OSMOCameraLink {
             (0x02, 0x13, Data()),   // 照片格式（非照片模式 DF）
             (0x02, 0x8E, OSMOA4.parameterGetPayload(type: OSMOA4.paramFOV)),
             (0x02, 0x8E, OSMOA4.parameterGetPayload(type: OSMOA4.paramEIS)),
+            (0x02, 0x8E, OSMOA4.parameterGetPayload(type: OSMOA4.paramISOMax)),
+            (0x02, 0x8E, OSMOA4.parameterGetPayload(type: OSMOA4.paramPro)),
+            (0x02, 0x8E, OSMOA4.parameterGetPayload(type: OSMOA4.paramLowLight)),
         ]
         for (i, q) in queries.enumerated() {
             queue.asyncAfter(deadline: .now() + Double(i) * 0.3) { [weak self] in
