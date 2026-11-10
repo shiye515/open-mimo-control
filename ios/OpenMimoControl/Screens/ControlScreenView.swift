@@ -351,28 +351,55 @@ struct ControlScreenView: View {
 
     // MARK: 实时预览卡（固定高度圆角卡片；左上角 REC 角标；捏合仅提示不发光命令 —— 6.8）
 
-    /// 4:3 取景区（设计稿修订）；16:9 码流由 resizeAspect 自动上下加黑边
+    /// 预览卡宽度（屏宽 - 左右各 12 边距）
+    private var previewWidth: CGFloat {
+        UIScreen.main.bounds.width - 24
+    }
+    /// 16:9 预览窗（2026-11-11 由 4:3 调整）；码流同为 16:9，满窗显示无黑边
     private var previewHeight: CGFloat {
-        (UIScreen.main.bounds.width - 24) * 3 / 4
+        previewWidth * 9 / 16
+    }
+
+    /// 相机旋转象限（pid 0x0014 回读）：0/1/2/3 = 逆时针 90° 象限数。
+    /// 预览视图顺时针旋转 (4-象限)%4 × 90° 跟随相机（2026-11-10 旋转抓包实锤：
+    /// 顺时针转 90/180/270° → 象限 3/2/1）；外层固定黑底不旋转
+    private var previewRotationQuarters: Int {
+        Int(st.orientationCode ?? 0) % 4
+    }
+
+    /// 码流宽高比（分辨率码 0x67/0x5F/0x0C 为 4:3，其余 16:9）
+    private var streamAspect: CGFloat {
+        switch st.videoResolutionCode {
+        case 0x67, 0x5F, 0x0C: return 4 / 3
+        default: return 16 / 9
+        }
     }
 
     private var previewCard: some View {
         ZStack(alignment: .topLeading) {
+            // 外层固定黑色背景（不旋转）：内层预览视图整体旋转后露出的角由它补齐。
+            // 必须显式限定卡片尺寸——无 frame 的 Color 是 greedy 的，会把 ZStack 撑出 4:3
+            Color.black
+                .frame(height: previewHeight)
+                .frame(maxWidth: .infinity)
             LivePreviewView(flow: flow)
                 .frame(height: previewHeight)
                 .frame(maxWidth: .infinity)
-                .clipShape(RoundedRectangle(cornerRadius: 14))
+                // 跟随相机旋转；奇数象限（垂直放置）缩放 1/码流宽高比，使旋转后内容
+                // 高度顶满卡片（4:3 流 0.75 / 16:9 流 9:16），仅左右留黑边
+                .rotationEffect(.degrees(Double((4 - previewRotationQuarters) % 4) * 90))
+                .scaleEffect(previewRotationQuarters % 2 == 1 ? 1 / streamAspect : 1)
             if gridMode >= 1 {
                 FramingGridOverlay(mode: gridMode)
                     .frame(height: previewHeight)
                     .frame(maxWidth: .infinity)
-                    .clipShape(RoundedRectangle(cornerRadius: 14))
             }
             if st.recordState == 2 {
                 RecBadge(seconds: st.clipSeconds ?? 0)
                     .padding(8)
             }
         }
+        .clipShape(RoundedRectangle(cornerRadius: 14))
         // 倍率角标用 overlay（不参与 ZStack sizing）——此前作为 maxHeight:.infinity 的
         // ZStack 子视图，变焦 >1x 时会把预览卡撑满剩余空间、面板整体下移
         .overlay(alignment: .topTrailing) {
@@ -386,6 +413,7 @@ struct ControlScreenView: View {
                     .padding(8)
             }
         }
+        .animation(.easeInOut(duration: 0.35), value: previewRotationQuarters)
         .simultaneousGesture(MagnifyGesture()
             .onChanged { v in
                 // 方向+时间：捏合期间按 ~10Hz 发方向命令，相机持续变焦

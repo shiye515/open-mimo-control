@@ -33,6 +33,8 @@ public final class OSMOCameraLink {
     private var heartbeatTimer: DispatchSourceTimer?
     /// 设置轮询定时器（相机端改动同步：参数 GET 每 3s 一轮）
     private var settingsPollTimer: DispatchSourceTimer?
+    /// 画面旋转象限专用快轮询（pid 0x0014，1s——旋转预览跟随需要比 3s 参数轮询更快）
+    private var orientationPollTimer: DispatchSourceTimer?
 
     private var session: UInt16
     private var baseSeq: UInt16
@@ -225,6 +227,7 @@ public final class OSMOCameraLink {
         ackTimer?.cancel()
         heartbeatTimer?.cancel()
         settingsPollTimer?.cancel()
+        orientationPollTimer?.cancel()
         connection?.cancel()
         pokeConnection?.cancel()
     }
@@ -579,6 +582,17 @@ public final class OSMOCameraLink {
         }
         t.resume()
         settingsPollTimer = t
+        // 旋转象限 1s 快轮询（官方 Mimo 同节奏；预览方向跟随需要低延迟）
+        orientationPollTimer?.cancel()
+        let o = DispatchSource.makeTimerSource(queue: queue)
+        o.schedule(deadline: .now() + 1.0, repeating: 1.0)
+        o.setEventHandler { [weak self] in
+            guard let self, !self.stopped, self.isReady else { return }
+            self.send(cmdSet: 0x02, cmdId: 0x8E,
+                      payload: OSMOA4.parameterGetPayload(type: OSMOA4.paramOrientation))
+        }
+        o.resume()
+        orientationPollTimer = o
     }
 
     // MARK: - 状态订阅与查询（osmocam §5.6 / §8）

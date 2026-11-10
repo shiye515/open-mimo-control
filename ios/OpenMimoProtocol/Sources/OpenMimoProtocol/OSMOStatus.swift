@@ -78,6 +78,8 @@ public struct OSMOStatusSnapshot: Equatable {
     public var isoMaxCode: UInt8?
     /// 弱光增稳（02/8E pid 0x0030 回读：01 开 / 00 关）
     public var lowLightCode: UInt8?
+    /// 画面旋转象限（02/8E pid 0x0014 回读：0/1/2/3 = 逆时针 90° 象限数）
+    public var orientationCode: UInt8?
     /// Pro 模式（02/8E pid 0x0000 回读：01 开 / 00 关；连接即查，控制专业参数显隐）
     public var proOnCode: UInt8?
     /// 相机竖拍模式（cam_portrait_mode 主题，竖拍安装时用于预览方向矫正）
@@ -545,6 +547,9 @@ public final class OSMOStatusTracker {
         case OSMOA4.paramEIS: snapshot.eisValue = p[6]
         case OSMOA4.paramISOMax: snapshot.isoMaxCode = p[6]
         case OSMOA4.paramLowLight: snapshot.lowLightCode = p[6]
+        case OSMOA4.paramOrientation:
+            // 3 字节值 [0, 象限, 0]（2026-11-10 旋转抓包实锤）；象限=逆时针 90° 计数
+            if p.count >= 8 { snapshot.orientationCode = p[7] }
         case OSMOA4.paramPro: snapshot.proOnCode = p[6]
         default: break
         }
