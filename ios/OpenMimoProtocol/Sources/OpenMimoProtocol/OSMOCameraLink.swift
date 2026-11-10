@@ -65,6 +65,8 @@ public final class OSMOCameraLink {
 
     /// 状态跟踪：解析 02/80、0D/02、02/DC、00/99 推送与 02/19/1F/2B/29/2D 查询应答
     let statusTracker = OSMOStatusTracker()
+    /// 事件回调（00/76 固件动作事件 event_id；失败事件由上层 toast）
+    public var onEventFailure: ((String) -> Void)?
     private var lastStatusEmit: DispatchTime?
 
     // MARK: - Frame Assembler
@@ -216,6 +218,18 @@ public final class OSMOCameraLink {
             self.queue.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                 guard let self, !self.stopped else { return }
                 self.sendStatusQueries()
+            }
+        }
+        // 00/76 固件动作事件：全部事件入日志；失败事件经 onEventFailure 供上层 toast
+        statusTracker.onEvent = { [weak self] eventID, dict in
+            guard let self else { return }
+            self.onLog?("[event] \(eventID)")
+            let failed = (dict["is_success"] as? Bool == false) || (dict["success"] as? Int == 0)
+            if failed {
+                let name = (dict["action"] as? String) ?? eventID
+                DispatchQueue.main.async { [weak self] in
+                    self?.onEventFailure?("相机动作失败：\(name)")
+                }
             }
         }
         queue.async { [weak self] in self?.pokeThenRun() }
@@ -588,6 +602,7 @@ public final class OSMOCameraLink {
         o.schedule(deadline: .now() + 1.0, repeating: 1.0)
         o.setEventHandler { [weak self] in
             guard let self, !self.stopped, self.isReady else { return }
+            self.statusTracker.noteParameterRequest(OSMOA4.paramOrientation)
             self.send(cmdSet: 0x02, cmdId: 0x8E,
                       payload: OSMOA4.parameterGetPayload(type: OSMOA4.paramOrientation))
         }
@@ -599,18 +614,24 @@ public final class OSMOCameraLink {
 
     /// 订阅命名状态主题（发到 0x28；应答 00=已订阅 / 01=该型号无此主题）。
     /// 订阅在相机重启前持续有效；重复订阅不重复推送。
+    /// 订阅主题全集（官方 Mimo 同款 20 主题，2026-11-10 抓包审计 unknown-signals-report；
+    /// 推送仅在变化时发生，camcap_common 能力表为一次性推送）
+    static let telemetryTopics = [
+        "cam_status", "cam_record_time", "cam_storage", "cam_fov", "cam_photo_param",
+        "cam_lapse_param", "cam_video_param_v2", "cam_expo_param", "cam_lens_state",
+        "cam_image_effect", "shutter_param", "camcap_common", "cam_custom_mode_params",
+        "cam_magnifier_status", "v_quality_enhance_status", "cam_audio_status_v2",
+        "audio_timecode_status", "timecode_info", "temp_curve", "cam_imu_calib_info",
+    ]
+
     private func sendStatusSubscriptions() {
-        // OA4 不发布 camcap_* 能力表（全部应答 01），不订阅；cam_video_param_v2 数据布局
-        // 文档未给全，订阅后若推送会以未知主题记录。
-        let topics = ["cam_expo_param", "cam_storage", "cam_video_param_v2",
-                      "cam_image_effect", "cam_lapse_param", "cam_portrait_mode"]
-        statusTracker.expectSubscriptionAcks(topics)
-        for (i, name) in topics.enumerated() {
+        statusTracker.expectSubscriptionAcks(Self.telemetryTopics)
+        for (i, name) in Self.telemetryTopics.enumerated() {
             send(cmdSet: 0x00, cmdId: 0x99,
                  payload: Self.topicSubscription(name: name, id: 0x6A00 + UInt32(i)),
                  receiver: addrTopics)
         }
-        log("[osmo] 已订阅 \(topics.count) 个状态主题")
+        log("[osmo] 已订阅 \(Self.telemetryTopics.count) 个状态主题")
     }
 
     /// osmocam protocol.py topic_subscription：
@@ -646,10 +667,18 @@ public final class OSMOCameraLink {
             (0x02, 0x8E, OSMOA4.parameterGetPayload(type: OSMOA4.paramISOMax)),
             (0x02, 0x8E, OSMOA4.parameterGetPayload(type: OSMOA4.paramPro)),
             (0x02, 0x8E, OSMOA4.parameterGetPayload(type: OSMOA4.paramLowLight)),
+            // 未解析 pid 轮询（诊断观测；06/28 恒负响应、15 恒 E3——负响应归因登记见 noteParameterRequest）
+            (0x02, 0x8E, OSMOA4.parameterGetPayload(type: 0x000A)),
+            (0x02, 0x8E, OSMOA4.parameterGetPayload(type: 0x0018)),
+            (0x02, 0x8E, OSMOA4.parameterGetPayload(type: 0x0020)),
+            (0x02, 0x8E, OSMOA4.parameterGetPayload(type: 0x0029)),
         ]
         for (i, q) in queries.enumerated() {
             queue.asyncAfter(deadline: .now() + Double(i) * 0.3) { [weak self] in
                 guard let self, !self.stopped else { return }
+                if q.0 == 0x02, q.1 == 0x8E, q.2.count >= 2 {
+                    self.statusTracker.noteParameterRequest(UInt16(q.2[0]) | (UInt16(q.2[1]) << 8))
+                }
                 self.send(cmdSet: q.0, cmdId: q.1, payload: q.2)
             }
         }

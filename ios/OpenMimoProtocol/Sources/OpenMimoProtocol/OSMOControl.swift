@@ -125,6 +125,11 @@ public enum OSMOA4 {
         let d = Double(dec)
         return d >= 10 ? d / 100 : d / 10
     }
+    /// 分母格式化：最多两位小数、去尾零（12.5 → "12.5"，1.67 → "1.67"，1.25 → "1.25"）
+    static func shutterDenominatorText(_ x: Double) -> String {
+        let two = String(format: "%.2f", x)
+        return two.hasSuffix("0") ? String(format: "%.1f", x) : two
+    }
 
     /// 快门显示（官方 Mimo 同款）：分数形式 "1/x s"；秒形式 <1s 显示为 1/x，≥1s 显示秒
     public static func shutterText(raw: UInt32) -> String {
@@ -132,13 +137,13 @@ public enum OSMOA4 {
         let decimal = (raw >> 16) & 0xFF
         if u16 & 0x8000 != 0 {
             let x = Double(u16 & 0x7FFF) + shutterFraction(decimal)
-            let txt = x == x.rounded() ? String(Int(x)) : String(format: "%.2f", x)
+            let txt = x == x.rounded() ? String(Int(x)) : Self.shutterDenominatorText(x)
             return "1/\(txt) s"
         }
         let s = Double(u16) + shutterFraction(decimal)
         if s > 0, s < 1 {
             let inv = 1 / s
-            let txt = inv == inv.rounded() ? String(Int(inv)) : String(format: "%.2f", inv)
+            let txt = inv == inv.rounded() ? String(Int(inv)) : Self.shutterDenominatorText(inv)
             return "1/\(txt) s"
         }
         return decimal == 0 ? "\(Int(s)) s" : String(format: "%.1f s", s)
@@ -159,6 +164,21 @@ public enum OSMOA4 {
         let v = Double(u16 & 0x7FFF) + shutterFraction((raw >> 16) & 0xFF)
         guard v > 0 else { return nil }
         return u16 & 0x8000 != 0 ? 1 / v : v
+    }
+
+    /// 相机 RTC 对时载荷（00/4A → 0x28）：`[年 u16 LE, 月, 日, 时, 分, 秒, 毫秒 u16 LE]`。
+    /// 2026-10-19 抓包实锤：`ea070a13133424e001` = 2026-10-19 19:52:36 +480ms（三方无记录）
+    public static func cameraClockPayload(date: Date, calendar: Calendar = .current) -> Data {
+        let c = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second, .nanosecond], from: date)
+        var d = Data()
+        let year = UInt16(truncatingIfNeeded: max(0, c.year ?? 0))
+        d.append(contentsOf: [UInt8(year & 0xFF), UInt8(year >> 8)])
+        for v in [c.month ?? 1, c.day ?? 1, c.hour ?? 0, c.minute ?? 0, c.second ?? 0] {
+            d.append(UInt8(truncatingIfNeeded: v))
+        }
+        let ms = UInt16(truncatingIfNeeded: (c.nanosecond ?? 0) / 1_000_000)
+        d.append(contentsOf: [UInt8(ms & 0xFF), UInt8(ms >> 8)])
+        return d
     }
 
     /// EV 补偿：单字节码 07h–19h（十进制 7–25），码 16(10h)=0EV，每码 1/3EV，共 19 档。
@@ -410,6 +430,13 @@ public extension OSMOCameraLink {
     /// 照片格式（02/12 [size, ratio]；仅照片模式）
     func setPhotoFormat(size: UInt8, ratio: UInt8) async throws {
         _ = try await request(cmdSet: 0x02, cmdId: 0x12, payload: Data([size, ratio]))
+    }
+
+    /// 相机 RTC 对时（00/4A → 0x28；连接成功后调用一次，相机 RTC 断电保持）
+    func setCameraClock(date: Date) async throws {
+        _ = try await request(cmdSet: 0x00, cmdId: 0x4A,
+                              payload: OSMOA4.cameraClockPayload(date: date),
+                              receiver: 0x28)
     }
 
     /// 拍照倒计时（02/4A；载荷 [00 01, 秒 u16 LE, 毫秒 u16 LE]，0/0=关闭。

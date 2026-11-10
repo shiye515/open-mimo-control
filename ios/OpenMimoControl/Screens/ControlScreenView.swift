@@ -395,7 +395,7 @@ struct ControlScreenView: View {
                     .frame(maxWidth: .infinity)
             }
             if st.recordState == 2 {
-                RecBadge(seconds: st.clipSeconds ?? 0)
+                RecBadge(seconds: Int64(st.recordSeconds ?? UInt32(st.clipSeconds ?? 0)))
                     .padding(8)
             }
         }
@@ -1189,6 +1189,24 @@ struct ControlScreenView: View {
                             .font(.caption2)
                             .foregroundStyle(.orange)
                     }
+                    // 未知信号（未解析主题/参数的原始记录，供抓包 diff；unknown-signals-report）
+                    if !st.rawParams.isEmpty || !st.rawTopicSamples.isEmpty {
+                        Divider().overlay(OC.stroke).padding(.vertical, 6)
+                        Text("未知信号（原始记录）")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(OC.textSecondary)
+                        ForEach(st.rawParams.sorted(by: { $0.key < $1.key }), id: \.key) { pid, hex in
+                            Text("pid \(String(format: "0x%04X", pid)) = \(hex)")
+                                .font(.system(size: 9.5, design: .monospaced))
+                                .foregroundStyle(OC.textTertiary)
+                        }
+                        ForEach(st.rawTopicSamples.sorted(by: { $0.key < $1.key }), id: \.key) { name, hex in
+                            Text("\(name): \(hex)")
+                                .font(.system(size: 9.5, design: .monospaced))
+                                .foregroundStyle(OC.textTertiary)
+                                .lineLimit(2)
+                        }
+                    }
                     Divider().overlay(OC.stroke).padding(.vertical, 6)
                     Text("诊断日志")
                         .font(.caption.weight(.medium))
@@ -1229,7 +1247,8 @@ struct ControlScreenView: View {
             ("拍摄模式", st.captureModeName ?? "—"),
             ("工作状态", st.workModeName ?? "—"),
             ("录制状态", st.recordStateName ?? "—"),
-            ("已录时长", st.clipSeconds.map { Self.durationText($0) } ?? "—"),
+            ("已录时长", st.recordSeconds.map { Self.durationText(Int64($0)) }
+                ?? st.clipSeconds.map { Self.durationText($0) } ?? "—"),
             ("写文件", st.isWritingFile ? "是" : "否"),
             ("媒体库模式", st.mediaMode ? "开" : "关"),
             ("剩余可录", st.videoSecondsLeft.map { Self.durationText($0) } ?? "—"),

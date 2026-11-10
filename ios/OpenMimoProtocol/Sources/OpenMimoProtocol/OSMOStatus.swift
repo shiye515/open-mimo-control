@@ -82,6 +82,14 @@ public struct OSMOStatusSnapshot: Equatable {
     public var orientationCode: UInt8?
     /// Pro 模式（02/8E pid 0x0000 回读：01 开 / 00 关；连接即查，控制专业参数显隐）
     public var proOnCode: UInt8?
+    /// 录制累计秒（cam_record_time 主题推送 u32 @0；推送优先于 02/80 内的 clipSeconds）
+    public var recordSeconds: UInt32?
+    /// 未确认布局主题的原始数据段（hex，值变化才更新；诊断面板展示供抓包 diff）
+    public var rawTopicSamples: [String: String] = [:]
+    /// 未解析 02/8E 参数 pid 的原始回读值（hex，诊断面板展示）
+    public var rawParams: [UInt16: String] = [:]
+    /// pid 0x000A 最新回读（诊断定位：01↔00 翻转语义未知）
+    public var rawParam0A: UInt8?
     /// 相机竖拍模式（cam_portrait_mode 主题，竖拍安装时用于预览方向矫正）
     public var portraitMode: Bool?
     /// 数码变焦倍率（cam_lens_state @14 ÷ 126；相机端变焦同步）
@@ -224,13 +232,13 @@ extension OSMOStatusSnapshot {
         let digit = OSMOA4.shutterFraction(UInt32(decimal))
         if u16 & 0x8000 != 0 {
             let x = Double(u16 & 0x7FFF) + digit
-            let txt = x == x.rounded() ? String(Int(x)) : String(format: "%.2f", x)
+            let txt = x == x.rounded() ? String(Int(x)) : OSMOA4.shutterDenominatorText(x)
             return "1/\(txt) s"
         }
         let s = Double(u16) + digit
         if s > 0, s < 1 {
             let inv = 1 / s
-            let txt = inv == inv.rounded() ? String(Int(inv)) : String(format: "%.2f", inv)
+            let txt = inv == inv.rounded() ? String(Int(inv)) : OSMOA4.shutterDenominatorText(inv)
             return "1/\(txt) s"
         }
         let txt = decimal == 0 ? String(Int(s)) : String(format: "%.1f", s)
@@ -304,8 +312,14 @@ public final class OSMOStatusTracker {
     private var loggedUnknownTopics: Set<String> = []
     /// 诊断日志（datalink 线程；OSMOCameraLink 接线）
     public var onLog: ((String) -> Void)?
+    /// 固件动作事件（00/76 JSON event_id + 完整字典；OSMOCameraLink 接线到 StepLogger/失败提示）
+    public var onEvent: ((String, [String: Any]) -> Void)?
     /// 待确认的订阅主题名队列（应答按订阅顺序回来）
     private var pendingTopicAcks: [String] = []
+    /// 最近一次 8E 参数 GET 的 pid（负响应归因到具体 pid；链路发送时登记）
+    var pendingParamType: UInt16?
+    /// pid 0x000A 上次回读值（翻转检测）
+    private var lastParam0A: UInt8?
 
     public init() {}
 
@@ -314,12 +328,18 @@ public final class OSMOStatusTracker {
         pendingTopicAcks = topics
     }
 
+    /// 链路发送 8E GET 前登记 pid（负响应单字节无 pid，归因到最近 GET——诊断用途）
+    public func noteParameterRequest(_ type: UInt16) {
+        pendingParamType = type
+    }
+
     /// parseDUML 解出的每条 DUML 帧（推送与查询应答都从这里进）
     public func handle(cmdSet: UInt8, cmdId: UInt8, sender: UInt8, payload: Data) {
         switch (cmdSet, cmdId) {
         case (0x02, 0x80): parseCameraStatus(payload)
         case (0x0D, 0x02): parseBattery(payload)
         case (0x02, 0xDC): parseStorage(payload)
+        case (0x00, 0x76): parseActionEvent(payload)
         case (0x00, 0x99):
             // 订阅应答（1B：00 已订阅 / 01 无此主题）vs 主题推送（长帧带名字）
             if payload.count <= 2 {
@@ -406,6 +426,18 @@ public final class OSMOStatusTracker {
         if p.count >= 32, u32(28) > 0 { snapshot.internalFreeMB = u32(28) }
     }
 
+    // MARK: 00/76 固件动作事件（JSON：拍照/录制/延时动作结果，三方无记录）
+    // 载荷形如 [长度头][00][{...}]：从首个 '{' 起 JSON 解析（实测 4 种 event_id 均可提取）
+
+    private func parseActionEvent(_ p: Data) {
+        guard let start = p.firstIndex(of: UInt8(ascii: "{")),
+              let end = p.lastIndex(of: UInt8(ascii: "}")), start < end else { return }
+        let obj = try? JSONSerialization.jsonObject(with: Data(p[start...end]))
+        guard let dict = obj as? [String: Any],
+              let eventID = dict["event_id"] as? String else { return }
+        onEvent?(eventID, dict)
+    }
+
     // MARK: 00/99 命名主题推送（osmocam §8.3）
     // 布局：02 06 00 00 <seq u16> 00×5 <rest u16> <nameLen u16> <name> 00×6 <dataLen u16> <data>
 
@@ -435,16 +467,33 @@ public final class OSMOStatusTracker {
                     snapshot.zoomFactor = (Double(lens) / 126.0 * 10).rounded() / 10
                 }
             }
-        case "cam_photo_param", "shutter_param", "cam_photo_param_new":
-            // 拍照参数/快门（疑似含定时拍摄状态，编码待学习）——每次推送全量记录，
-            // 相机端开/关定时后对比 diff 即可定位取值位置
-            onLog?("主题 \(name) 推送 \(data.count)B: \(data.map { String(format: "%02x", $0) }.joined())")
+        case "cam_record_time":
+            // u32 秒 @0（2026-11-08 抓包实锤：录制中逐秒递增，39 次变化与启停对齐）
+            if data.count >= 4 {
+                snapshot.recordSeconds = UInt32(data[0]) | UInt32(data[1]) << 8
+                    | UInt32(data[2]) << 16 | UInt32(data[3]) << 24
+            }
+        case "cam_fov", "shutter_param", "cam_photo_param", "cam_photo_param_new",
+             "temp_curve", "camcap_common", "cam_audio_status_v2", "cam_imu_calib_info",
+             "cam_video_param_v2", "cam_storage", "cam_status", "cam_custom_mode_params",
+             "cam_magnifier_status", "v_quality_enhance_status", "audio_timecode_status",
+             "timecode_info":
+            // 布局未实锤：原始数据段记录（值变化才更新），诊断面板展示供抓包 diff
+            recordRawTopic(name, data)
         default:
             if !loggedUnknownTopics.contains(name) {
                 loggedUnknownTopics.insert(name)
                 onLog?("主题 \(name) 推送 \(data.count)B: \(data.map { String(format: "%02x", $0) }.joined().prefix(28))（未解析，首见记录）")
             }
         }
+    }
+
+    /// 未确认布局主题：原始数据段记录到快照（值变化才更新；诊断面板展示，供抓包 diff）
+    private func recordRawTopic(_ name: String, _ data: [UInt8]) {
+        let hex = data.map { String(format: "%02x", $0) }.joined()
+        guard snapshot.rawTopicSamples[name] != hex else { return }
+        snapshot.rawTopicSamples[name] = hex
+        onChanged?(snapshot)
     }
 
     /// cam_expo_param：ISO u32 @16、快门 u16 @20、EV 补偿 @6、测光 @15（osmocam §8.3）
@@ -535,22 +584,39 @@ public final class OSMOStatusTracker {
     /// 写命令的应答仅 1B 结果码。
     private func parseParameterReply(_ p: Data) {
         guard let result = p.first else { return }
+        // 成功应答内嵌 pid；负响应单字节无 pid——用链路登记的最近 GET pid 归因（诊断用途）
+        let replyPid: UInt16? = (p.count >= 5 && p[1] == 0x00 && p[2] == 0x01)
+            ? UInt16(p[3]) | (UInt16(p[4]) << 8) : nil
+        let type = replyPid ?? pendingParamType ?? 0xFFFF
+        let pidKey = "param-\(String(format: "%04X", type))"
         guard result == 0x00 else {
-            setQueryError("param", result)
+            setQueryError(pidKey, result)
             return
         }
+        snapshot.queryErrors.removeValue(forKey: pidKey)
         snapshot.queryErrors.removeValue(forKey: "param")
         guard p.count >= 7, p[1] == 0x00, p[2] == 0x01 else { return }
-        let type = UInt16(p[3]) | (UInt16(p[4]) << 8)
+        let valLen = Int(p[5])
+        if valLen > 0, p.count >= 6 + valLen {
+            // 未解析 pid 的原始回读（诊断观测；已知 pid 亦记录便于对照）
+            snapshot.rawParams[type] = p[6..<6+valLen].map { String(format: "%02x", $0) }.joined()
+        }
+        if type == 0x000A, p.count >= 7 {
+            if lastParam0A != p[6] {
+                onLog?("[diag] pid 000A 翻转 → 0x\(String(p[6], radix: 16))")
+                lastParam0A = p[6]
+            }
+            snapshot.rawParam0A = p[6]
+        }
         switch type {
         case OSMOA4.paramFOV: snapshot.fovValue = p[6]
         case OSMOA4.paramEIS: snapshot.eisValue = p[6]
         case OSMOA4.paramISOMax: snapshot.isoMaxCode = p[6]
+        case OSMOA4.paramPro: snapshot.proOnCode = p[6]
         case OSMOA4.paramLowLight: snapshot.lowLightCode = p[6]
         case OSMOA4.paramOrientation:
             // 3 字节值 [0, 象限, 0]（2026-11-10 旋转抓包实锤）；象限=逆时针 90° 计数
             if p.count >= 8 { snapshot.orientationCode = p[7] }
-        case OSMOA4.paramPro: snapshot.proOnCode = p[6]
         default: break
         }
     }

@@ -58,6 +58,20 @@ final class ConnectionFlow: ObservableObject {
         osmoLink?.startLiveView()
     }
 
+    /// 连接成功后相机 RTC 对时（00/4A 一次；相机 RTC 断电保持，无需周期同步）
+    private func syncCameraClock() {
+        Task { _ = await osmoCommand("相机对时") { link in
+            try await link.setCameraClock(date: Date())
+        } }
+    }
+
+    /// 固件动作事件失败提示（00/76 is_success=false → 既有 osmoError toast 通道）
+    private func handleEventFailure(_ message: String) {
+        Task { @MainActor in
+            osmoError = message
+        }
+    }
+
     /// --auto-switch 自动化钩子：切到视频模式后把分辨率在 16:9(1080p) ↔ 4:3(2.7K) 间切换
     /// （改变取景流尺寸，重启编码器），验证预览在切换后恢复
     public func autoSwitchAspect() async {
@@ -282,6 +296,7 @@ final class ConnectionFlow: ObservableObject {
             await stepConnect()
             state = .success
             log(.connecting, "流程完成", content: "复用相机网络直连")
+            syncCameraClock()
             onFlowCompleted?()
             return
         }
@@ -311,6 +326,7 @@ final class ConnectionFlow: ObservableObject {
 
         state = .success
         log(.connecting, "流程完成", content: "已连接相机")
+        syncCameraClock()
         onFlowCompleted?()
     }
 
@@ -531,6 +547,9 @@ final class ConnectionFlow: ObservableObject {
             }
         )
         osmoLink = link
+        link.onEventFailure = { [weak self] message in
+            self?.handleEventFailure(message)
+        }
         link.start()
         log(.connecting, "OSMOCameraLink started", content: "osmocam protocol, H.265")
     }

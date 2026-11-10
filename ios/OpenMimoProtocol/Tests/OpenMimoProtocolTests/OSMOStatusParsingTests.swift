@@ -105,8 +105,8 @@ final class OSMOStatusParsingTests: XCTestCase {
                  payload: topicFrame(name: "cam_expo_param", data: d))
 
         XCTAssertEqual(t.snapshot.expoCompValue, 0x13)
-        XCTAssertEqual(t.snapshot.expoCompName, "+3 EV")
-        XCTAssertEqual(t.snapshot.lightMeterName, "-1 EV")
+        XCTAssertEqual(t.snapshot.expoCompName, "+1.0")      // 0x13：码 16=0EV → +1.0（一位小数）
+        XCTAssertEqual(t.snapshot.lightMeterName, "-3.0 EV")
         XCTAssertEqual(t.snapshot.effectiveISO, 3_200)
         XCTAssertEqual(t.snapshot.effectiveShutter, 0x8019)
         XCTAssertEqual(t.snapshot.effectiveShutterName, "1/25 s")
@@ -114,7 +114,7 @@ final class OSMOStatusParsingTests: XCTestCase {
 
     func testImageEffectAndLapseTopics() {
         var d = [UInt8](repeating: 0, count: 16)
-        d[2] = 0x3D                       // D-Log M
+        d[2] = 0x34                       // D-Log M（OA4 实测码 0x34；Nano 的 0x3D 不适用）
         d[14] = 0xFF                      // 降噪 -1（s8 位型）
         d[15] = 2                         // 锐度 +2
         let t = OSMOStatusTracker()
@@ -171,6 +171,102 @@ final class OSMOStatusParsingTests: XCTestCase {
         t.handle(cmdSet: 0x02, cmdId: 0x29, sender: 0x01, payload: Data([0xDF]))  // 自动曝光下快门 DF
         XCTAssertEqual(t.snapshot.queryErrors["shutter"], 0xDF)
         XCTAssertEqual(t.snapshot.shutterName, nil)
+    }
+
+    // MARK: 00/99 主题推送扩容（unknown-signals-report 实测布局）
+
+    /// 构造 00/99 命名主题推送帧载荷（布局同 osmocam §8.3 / parseTopicPush）
+    private func topicPush(name: String, data: [UInt8]) -> [UInt8] {
+        var p: [UInt8] = [0x02, 0x06, 0x00, 0x00, 0xd5, 0xf0, 0, 0, 0, 0, 0]
+        let nameBytes = Array(name.utf8)
+        let rest = nameBytes.count + 6
+        p += le16(UInt16(rest))
+        p += le16(UInt16(nameBytes.count))
+        p += nameBytes
+        p += [UInt8](repeating: 0, count: 6)
+        p += le16(UInt16(data.count))
+        p += data
+        return p
+    }
+
+    func testRecordTimePush() {
+        let t = OSMOStatusTracker()
+        t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
+                 payload: Data(topicPush(name: "cam_record_time", data: [1, 0, 0, 0, 0, 0])))
+        t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
+                 payload: Data(topicPush(name: "cam_record_time", data: [37, 0, 0, 0, 0, 0])))
+        XCTAssertEqual(t.snapshot.recordSeconds, 37)
+    }
+
+    func testRawTopicSampleRecordedOnChangeOnly() {
+        let t = OSMOStatusTracker()
+        let fovData: [UInt8] = [0x6d, 0x09, 0x00, 0x00, 0x11, 0x07, 0x00, 0x00,
+                                0x01, 0x00, 0x00, 0x00, 0x38, 0x31, 0x00, 0x00]
+        t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
+                 payload: Data(topicPush(name: "cam_fov", data: fovData)))
+        XCTAssertEqual(t.snapshot.rawTopicSamples["cam_fov"], fovData.map { String(format: "%02x", $0) }.joined())
+        // 相同数据重复推送不产生变化（快照引用相同 hex）
+        t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
+                 payload: Data(topicPush(name: "cam_fov", data: fovData)))
+        XCTAssertEqual(t.snapshot.rawTopicSamples["cam_fov"], fovData.map { String(format: "%02x", $0) }.joined())
+    }
+
+    func testUnknownParamRawReadsAnd0AFlipLog() {
+        let t = OSMOStatusTracker()
+        var logs: [String] = []
+        t.onLog = { logs.append($0) }
+        // 成功应答内嵌 pid：00 00 01 0A 00 01 01
+        t.handle(cmdSet: 0x02, cmdId: 0x8E, sender: 0x01,
+                 payload: Data([0x00, 0x00, 0x01, 0x0A, 0x00, 0x01, 0x01]))
+        XCTAssertEqual(t.snapshot.rawParams[0x000A], "01")
+        XCTAssertEqual(t.snapshot.rawParam0A, 0x01)
+        // 翻转 01 → 00：负响应之外的合法应答
+        t.handle(cmdSet: 0x02, cmdId: 0x8E, sender: 0x01,
+                 payload: Data([0x00, 0x00, 0x01, 0x0A, 0x00, 0x01, 0x00]))
+        XCTAssertEqual(t.snapshot.rawParam0A, 0x00)
+        XCTAssertTrue(logs.contains { $0.contains("pid 000A") })
+    }
+
+    func testNegativeParamAttributedToLastRequestedPid() {
+        let t = OSMOStatusTracker()
+        t.noteParameterRequest(0x0015)
+        t.handle(cmdSet: 0x02, cmdId: 0x8E, sender: 0x01, payload: Data([0xE3]))
+        XCTAssertEqual(t.snapshot.queryErrors["param-0015"], 0xE3)
+    }
+
+    // MARK: 00/4A 相机 RTC 对时载荷（2026-10-19 抓包实锤帧）
+
+    func testCameraClockPayloadMatchesCapture() {
+        var comps = DateComponents()
+        comps.year = 2026; comps.month = 10; comps.day = 19
+        comps.hour = 19; comps.minute = 52; comps.second = 36
+        comps.nanosecond = 480_000_000
+        let date = Calendar(identifier: .gregorian).date(from: comps)!
+        let d = OSMOA4.cameraClockPayload(date: date,
+                                          calendar: Calendar(identifier: .gregorian))
+        XCTAssertEqual(Array(d), [0xEA, 0x07, 0x0A, 0x13, 0x13, 0x34, 0x24, 0xE0, 0x01])
+    }
+
+    // MARK: 00/76 固件动作事件（JSON event_id 提取）
+
+    func testActionEventExtracted() {
+        let t = OSMOStatusTracker()
+        var events: [String] = []
+        t.onEvent = { id, _ in events.append(id) }
+        let json = #"{"event_id":"fw_0100_action_result","action":"record","is_success":true}"#
+        let payload: [UInt8] = [0x00, 0x30, 0x00] + Array(json.utf8)
+        t.handle(cmdSet: 0x00, cmdId: 0x76, sender: 0x28, payload: Data(payload))
+        XCTAssertEqual(events, ["fw_0100_action_result"])
+    }
+
+    func testActionEventFailureFieldExtractable() {
+        // 失败判定在 OSMOCameraLink 接线层（is_success=false → onEventFailure → toast）；
+        // 这里锁定 JSON 字段可从真实载荷形态（长度头 + JSON 文本）提取
+        let json = #"{"event_id":"fw_0100_action_result","action":"capture","is_success":false}"#
+        let payload: [UInt8] = [0x00, 0x30, 0x00] + Array(json.utf8)
+        let obj = try? JSONSerialization.jsonObject(with: Data(payload[3...]))
+        XCTAssertEqual((obj as? [String: Any])?["is_success"] as? Bool, false)
+        XCTAssertEqual((obj as? [String: Any])?["event_id"] as? String, "fw_0100_action_result")
     }
 
     // MARK: 订阅帧构造（osmocam protocol.py topic_subscription）

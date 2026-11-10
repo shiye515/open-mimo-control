@@ -260,3 +260,22 @@ GET 回读接入参数轮询。
 
 - 拍照倒计时已实锤（02/4A，见上文专节），从未定案移除；
   `cam_photo_param`/`shutter_param` 推送已全量记录待 diff。
+
+### 命名主题订阅全集与录制时长（2026-11-11 接入）
+
+订阅从 6 主题扩容为官方 Mimo 同款 **20 主题**（清单见 unknown-signals-report.md）。
+`cam_record_time` 数据段布局实锤（u32 秒 @0 + u16 保留，录制中逐秒递增、39 次变化与
+启停对齐）——App 端 REC 计时/已录时长优先取该推送（`recordSeconds`），02/80 内的
+clipSeconds 作为兜底。其余 14 主题布局未实锤：App 端原始 hex 记录到诊断面板
+「未知信号」区（值变化才更新），布局实锤前不做语义解析。
+
+### 00/76 固件动作事件与 00/4A 相机对时（已接入）
+
+- **00/76**：JSON 事件（`event_id` = fw_0100_action_result / record_info / lapse_info /
+  capture_info），载荷 = 长度头 + JSON 文本；App 解析 event_id 记录日志，
+  `is_success=false` 时 toast 反馈。
+- **00/4A（02→28）**：相机 RTC 对时，载荷 `[年 u16 LE, 月, 日, 时, 分, 秒, 毫秒 u16 LE]`
+  （实测 `ea070a13133424e001` = 2026-10-19 19:52:36 +480ms）；App 连接成功后下发一次
+  手机本地时间。
+- **pid 0x000A**：未解析参数中唯一值变化的（01↔00），已加入轮询与诊断翻转日志，
+  语义待操作对照定位（见 unknown-signals-report.md）。
