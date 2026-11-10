@@ -1,6 +1,7 @@
 import Foundation
 import NetworkExtension
 import CoreBluetooth
+import UIKit
 import OpenMimoProtocol
 import Combine
 
@@ -46,6 +47,8 @@ final class ConnectionFlow: ObservableObject {
     private let waker = CameraBleWaker.shared
     /// OSMO 实时画面 datalink（osmocam 协议，H.265 未加密）
     private var osmoLink: OSMOCameraLink?
+    /// 后台期间曾处于已连接态（回前台时探测链路并按需重连）
+    private var needsForegroundReconnect = false
 
     /// 素材页复用同一 datalink（相机单客户端）；未连接时为 nil
     public var activeOSMOLink: OSMOCameraLink? { osmoLink }
@@ -186,6 +189,46 @@ final class ConnectionFlow: ObservableObject {
         CameraBleWaker.logSink = { [weak self] line in
             Task { @MainActor in
                 self?.log(.waking, line, content: "")
+            }
+        }
+        observeAppLifecycle()
+    }
+
+    // MARK: - 前后台生命周期（App 挂起后链路必然断、相机单客户端会释放会话）
+
+    private func observeAppLifecycle() {
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.handleEnteredBackground() }
+        }
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.handleWillEnterForeground() }
+        }
+    }
+
+    private func handleEnteredBackground() {
+        guard case .success = state else { return }
+        needsForegroundReconnect = true
+    }
+
+    /// 回前台：探测链路——存活仅恢复推流（短后台无损）；已死整链重建（已入网走直连快路径）
+    private func handleWillEnterForeground() {
+        guard needsForegroundReconnect else { return }
+        needsForegroundReconnect = false
+        guard case .success = state, let link = osmoLink else { return }
+        log(.connecting, "回前台探测链路", content: "")
+        Task { [weak self] in
+            let alive = (try? await link.request(cmdSet: 0x02, cmdId: 0x19, timeout: 2.0)) != nil
+            guard let self else { return }
+            if alive {
+                log(.connecting, "链路存活", content: "恢复实时预览")
+                resumeOSMOLiveView()
+            } else {
+                log(.connecting, "链路已断，自动重连", content: "")
+                start()
             }
         }
     }
@@ -435,7 +478,17 @@ final class ConnectionFlow: ObservableObject {
     /// handshake OK 本身就是比老 session "connected" 更强的可达性确认。
     private func stepConnect() async {
         AppSessionHolder.shared.session = nil   // 切断老会话的持有与自动重建
+        stopOSMOLink()   // 每次连接会话都重建链路：复用旧链路会把后台/重试前的死连接带回来
         startOSMOLiveView()
+    }
+
+    /// 关闭并丢弃当前 OSMO datalink（重连/重试前必须调用，否则死连接被复用）
+    private func stopOSMOLink() {
+        guard let link = osmoLink else { return }
+        link.stop()
+        osmoLink = nil
+        osmoFrameCount = 0
+        log(.connecting, "OSMOCameraLink stopped", content: "")
     }
 
     /// OSMO 实时画面（osmocam 协议，未加密 H.265）

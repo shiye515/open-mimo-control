@@ -409,6 +409,16 @@ public extension OSMOCameraLink {
         _ = try await request(cmdSet: 0x02, cmdId: 0x12, payload: Data([size, ratio]))
     }
 
+    /// 拍照倒计时（02/4A；载荷 [00 01, 秒 u16 LE, 毫秒 u16 LE]，0/0=关闭。
+    /// 2026-11-10 官方 Mimo 抓包实锤：关闭/0.5s/1s/2s/3s/5s/10s/关闭 序列 8 帧，
+    /// 载荷 0s+500ms=0.5s、1s+0ms=1s…，全部 ACK 单字节 00；无 GET 回读形态观测）
+    func setCountdown(seconds: UInt16, millis: UInt16) async throws {
+        var p = Data([0x00, 0x01])
+        p.append(contentsOf: [UInt8(seconds & 0xFF), UInt8(seconds >> 8)])
+        p.append(contentsOf: [UInt8(millis & 0xFF), UInt8(millis >> 8)])
+        _ = try await request(cmdSet: 0x02, cmdId: 0x4A, payload: p)
+    }
+
     // 延时 / 运动延时
 
     /// 延时参数（02/6C timelapse 形；save/间隔/时长，其余保持相机现值由回读校准）

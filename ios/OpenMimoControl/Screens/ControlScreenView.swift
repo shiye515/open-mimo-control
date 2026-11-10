@@ -30,6 +30,10 @@ struct ControlScreenView: View {
     /// 图像调节模式（本地记忆门控锐度/降噪）：0 默认 / 1 人像 / 2 自定义
     @AppStorage("image.tune") private var imageTune = 0
     static let imageTuneModes = ["默认", "人像", "自定义"]
+    /// 拍照倒计时（本地记忆；0 关闭，1-6 对应 0.5/1/2/3/5/10s。02/4A 已实锤）
+    @AppStorage("photo.countdown") private var photoCountdown = 0
+    static let countdownModes = ["关闭", "0.5s", "1s", "2s", "3s", "5s", "10s"]
+    static let countdownMillis: [UInt32] = [0, 500, 1000, 2000, 3000, 5000, 10000]
     /// 弱光增稳本地即时覆盖（SET 成功后先行显示；回读 pid 0x0030 到达后以快照为准）
     @State private var lowLightOverride: Bool?
     /// 系统滚轮逐档反馈：选择震动 + 系统 tick 音效
@@ -551,9 +555,21 @@ struct ControlScreenView: View {
     }
 
     /// 通用设置组（优先级：分辨率/帧率 → 视角 → 变焦 → 电子增稳 → 弱光增稳 → 网格。
-    /// 慢动作模式以组合格式项替代分辨率/帧率；照片模式无分辨率/帧率）
+    /// 慢动作模式以组合格式项替代分辨率/帧率；照片模式无分辨率/帧率。
+    /// ⚠️ ViewBuilder 单帧过大曾致主线程栈溢出（素材页返回整面板重建时，崩溃日志
+    /// OpenMimoControl-2026-11-10-014339：videoPills.getter ___chkstk）——大组必须拆
+    /// 子 builder、闭包体抽方法，勿再往单一 getter 堆控制项）
     @ViewBuilder
     private var videoPills: some View {
+        videoFormatPills
+        fovZoomPills
+        stabilizePills
+        gridCountdownPills
+    }
+
+    /// 分辨率/帧率/慢动作（格式类：live=false 滚轮仅关闭时下发；<6 档回退 Menu）
+    @ViewBuilder
+    private var videoFormatPills: some View {
         let mode = st.captureMode
         if mode == OSMOA4.modeSlowmo {
             pillRow("慢动作", current: slowmoCurrent,
@@ -565,81 +581,130 @@ struct ControlScreenView: View {
                 }
             }
         } else if mode != OSMOA4.modePhoto {
-            // 分辨率/帧率（格式类：live=false 滚轮仅关闭时下发；<6 档由 pillWheelRow 回退 Menu）
-            let resCodes = OSMOA4.modeResolutions[mode ?? OSMOA4.modeVideo] ?? []
-            let resOptions = resCodes.compactMap { OSMOA4.resolutionNames[$0] }
             pillWheelRow("分辨率", current: st.videoResolutionName,
-                         options: resOptions,
-                         initialIndex: st.videoResolutionCode.flatMap { resCodes.firstIndex(of: $0) },
+                         options: activeResOptions,
+                         initialIndex: st.videoResolutionCode.flatMap { activeResCodes.firstIndex(of: $0) },
                          live: false,
-                         onPick: { i in
-                             guard i < resCodes.count else { return }
-                             let res = resCodes[i]
-                             let fps = st.videoFpsCode ?? 3
-                             Task { _ = await flow.osmoFormatCommand("分辨率") { link in
-                                 try await link.setVideoFormat(res: res, fps: fps)
-                             } }
-                         },
+                         onPick: { pickResolution($0) },
                          onClose: { flow.refreshOSMOQueries() })
-            let fpsCodes = OSMOA4.fpsOptions(mode: mode ?? OSMOA4.modeVideo,
-                                             res: st.videoResolutionCode ?? 0x0A)
-            let fpsOptionNames = fpsCodes.compactMap { OSMOA4.fpsNames[$0].map { "\($0)fps" } }
             pillWheelRow("帧率", current: st.videoFpsName.map { "\($0)fps" },
-                         options: fpsOptionNames,
-                         initialIndex: st.videoFpsCode.flatMap { fpsCodes.firstIndex(of: $0) },
+                         options: activeFpsOptionNames,
+                         initialIndex: st.videoFpsCode.flatMap { activeFpsCodes.firstIndex(of: $0) },
                          live: false,
-                         onPick: { i in
-                             guard i < fpsCodes.count else { return }
-                             let res = st.videoResolutionCode ?? 0x0A
-                             Task { _ = await flow.osmoFormatCommand("帧率") { link in
-                                 try await link.setVideoFormat(res: res, fps: fpsCodes[i])
-                             } }
-                         },
+                         onPick: { pickFPS($0) },
                          onClose: { flow.refreshOSMOQueries() })
         }
+    }
+
+    private var activeResCodes: [UInt8] {
+        OSMOA4.modeResolutions[st.captureMode ?? OSMOA4.modeVideo] ?? []
+    }
+    private var activeResOptions: [String] {
+        activeResCodes.compactMap { OSMOA4.resolutionNames[$0] }
+    }
+    private var activeFpsCodes: [UInt8] {
+        OSMOA4.fpsOptions(mode: st.captureMode ?? OSMOA4.modeVideo, res: st.videoResolutionCode ?? 0x0A)
+    }
+    private var activeFpsOptionNames: [String] {
+        activeFpsCodes.compactMap { OSMOA4.fpsNames[$0].map { "\($0)fps" } }
+    }
+    private func pickResolution(_ i: Int) {
+        let codes = activeResCodes
+        guard i < codes.count else { return }
+        let res = codes[i]
+        let fps = st.videoFpsCode ?? 3
+        Task { _ = await flow.osmoFormatCommand("分辨率") { link in
+            try await link.setVideoFormat(res: res, fps: fps)
+        } }
+    }
+    private func pickFPS(_ i: Int) {
+        let codes = activeFpsCodes
+        guard i < codes.count else { return }
+        let res = st.videoResolutionCode ?? 0x0A
+        Task { _ = await flow.osmoFormatCommand("帧率") { link in
+            try await link.setVideoFormat(res: res, fps: codes[i])
+        } }
+    }
+
+    /// 视角 + 变焦入口
+    @ViewBuilder
+    private var fovZoomPills: some View {
         pillRow("视角", current: st.fovValue.flatMap { OSMOA4.fovName($0) },
                 options: fovOptions.map(\.name)) { i in
-            let codes = fovOptions.map(\.code)
-            guard i < codes.count else { return }
+            pickFOV(i)
+        }
+        if let range = zoomRange {
+            zoomEntryButton(range)
+        }
+    }
+    private func pickFOV(_ i: Int) {
+        let codes = fovOptions.map(\.code)
+        guard i < codes.count else { return }
+        Task {
             let ok = await flow.osmoCommand("视角") { link in try await link.setFOV(codes[i]) }
             if ok != nil {
                 await MainActor.run { flow.refreshOSMOQueries() }
             }
         }
-        if let range = zoomRange {
-            zoomEntryButton(range)
-        }
-        // 电子增稳仅视频模式（其他模式无增稳档位）
-        if mode == OSMOA4.modeVideo {
+    }
+
+    /// 电子增稳/弱光增稳（仅视频模式）
+    @ViewBuilder
+    private var stabilizePills: some View {
+        if st.captureMode == OSMOA4.modeVideo {
             pillWheelRow("电子增稳", current: st.eisValue.flatMap { OSMOA4.eisName($0) },
                          options: OSMOA4.eisModes.map(\.name),
                          initialIndex: st.eisValue.flatMap { v in OSMOA4.eisModes.firstIndex { $0.code == v } },
-                         onPick: { i in
-                             guard i < OSMOA4.eisModes.count else { return }
-                             Task { _ = await flow.osmoCommand("电子增稳") { try await $0.setEIS(OSMOA4.eisModes[i].code) } }
-                         },
+                         onPick: { pickEIS($0) },
                          onClose: { flow.refreshOSMOQueries() })
-        }
-        // 弱光增稳（02/8E pid 0x0030，2026-11-10 Mimo 抓包实锤；仅视频模式）
-        if mode == OSMOA4.modeVideo {
+            // 弱光增稳（02/8E pid 0x0030，2026-11-10 Mimo 抓包实锤）
             pillRow("弱光增稳", current: lowLightOverride.map { $0 ? "开启" : "关闭" }
                         ?? (st.lowLightCode == 1 ? "开启" : st.lowLightCode == 0 ? "关闭" : nil),
                     options: ["关闭", "开启"]) { i in
-                let on = i == 1
-                let ok = await flow.osmoCommand("弱光增稳") { link in try await link.setLowLight(on) }
-                if ok != nil {
-                    await MainActor.run {
-                        lowLightOverride = on            // 即时反馈；回读到达后对齐
-                        flow.refreshOSMOQueries()
-                    }
+                pickLowLight(i == 1)
+            }
+        }
+    }
+    private func pickEIS(_ i: Int) {
+        guard i < OSMOA4.eisModes.count else { return }
+        Task { _ = await flow.osmoCommand("电子增稳") { try await $0.setEIS(OSMOA4.eisModes[i].code) } }
+    }
+    private func pickLowLight(_ on: Bool) {
+        Task {
+            let ok = await flow.osmoCommand("弱光增稳") { link in try await link.setLowLight(on) }
+            if ok != nil {
+                await MainActor.run {
+                    lowLightOverride = on            // 即时反馈；回读到达后对齐
+                    flow.refreshOSMOQueries()
                 }
             }
         }
+    }
+
+    /// 网格（App 端叠加）/ 拍照倒计时（仅照片模式）
+    @ViewBuilder
+    private var gridCountdownPills: some View {
         // 取景网格（官方 Mimo 即 App 端预览叠加，不向相机发送命令）
         pillRow("网格", current: Self.gridModes[gridMode],
                 options: Self.gridModes) { i in
-            await MainActor.run { gridMode = i }
+            gridMode = i
         }
+        // 拍照倒计时（02/4A，2026-11-10 Mimo 抓包实锤；无 GET 回读形态，本地记忆当前值）
+        if st.captureMode == OSMOA4.modePhoto {
+            pillWheelRow("拍照倒计时", current: Self.countdownModes[photoCountdown],
+                         options: Self.countdownModes,
+                         initialIndex: photoCountdown, live: false,
+                         onPick: { pickCountdown($0) })
+        }
+    }
+    private func pickCountdown(_ i: Int) {
+        guard i != photoCountdown else { return }
+        photoCountdown = i
+        let ms = Self.countdownMillis[i]
+        Task { _ = await flow.osmoCommand("拍照倒计时") { link in
+            try await link.setCountdown(seconds: UInt16(ms / 1000),
+                                        millis: UInt16(ms % 1000))
+        } }
     }
 
     static let gridModes = ["关闭", "网格线", "网格线和对角线"]
@@ -660,32 +725,22 @@ struct ControlScreenView: View {
         }
     }
 
-    /// 曝光组（Pro 开启时显示：曝光 → Shutter → ISO → ISO MAX；EV 用中心刻度条。
-    /// 02/1E 手动下才能设 ISO/快门；自动下才能设 ISO MAX）
+    /// 曝光组（Pro 开启时显示：曝光 → EV → 快门 → ISO → ISO MAX。
+    /// 自动曝光下快门/ISO 置灰并回显相机自计算值；02/1E 手动下才能设快门/ISO）
     @ViewBuilder
     private var exposurePills: some View {
         let manual = st.exposureMode == 0x04
         if proOn {
             pillRow("曝光", current: st.exposureModeName,
                     options: ["自动", "手动"]) { i in
-                let ok = await flow.osmoCommand("曝光模式") { link in try await link.setExposureMode(auto: i == 0) }
-                if ok != nil {
-                    await MainActor.run { flow.refreshOSMOQueries() }
-                }
+                pickExposureMode(auto: i == 0)
             }
             evPill
-            // 视频模式快门上限 1/25（官方约束）；自动曝光下回显相机自计算值（02/29 应答 DF，实际值来自 cam_expo_param）
-            let shutterRaws = st.captureMode == OSMOA4.modeVideo
-                ? OSMOA4.shutterSpeeds.filter { (OSMOA4.shutterSeconds(raw: $0) ?? 0) <= 1.0 / 25.0 + 1e-9 }
-                : OSMOA4.shutterSpeeds
             pillWheelRow("快门", current: manual ? st.shutterName : (st.effectiveShutterName ?? st.shutterName),
-                         options: shutterRaws.map { OSMOA4.shutterText(raw: $0) },
-                         initialIndex: st.shutterRaw.flatMap { shutterRaws.firstIndex(of: $0) },
+                         options: activeShutterRaws.map { OSMOA4.shutterText(raw: $0) },
+                         initialIndex: st.shutterRaw.flatMap { activeShutterRaws.firstIndex(of: $0) },
                          disabled: !manual,
-                         onPick: { i in
-                             guard i < shutterRaws.count else { return }
-                             Task { _ = await flow.osmoCommand("快门") { try await $0.setShutter(raw: shutterRaws[i]) } }
-                         },
+                         onPick: { pickShutter($0) },
                          onClose: { flow.refreshOSMOQueries() })
             pillWheelRow("ISO", current: manual ? st.isoName : (st.effectiveISOName ?? st.isoName),
                          options: ["自动"] + OSMOA4.isoCodes.map { "\($0.value)" },
@@ -693,21 +748,43 @@ struct ControlScreenView: View {
                              c == 0 ? 0 : OSMOA4.isoCodes.firstIndex { $0.code == c }.map { $0 + 1 }
                          },
                          disabled: !manual,
-                         onPick: { i in
-                             let code = i == 0 ? UInt8(0) : OSMOA4.isoCodes[i - 1].code
-                             Task { _ = await flow.osmoCommand("ISO") { try await $0.setISO(code) } }
-                         },
+                         onPick: { pickISO($0) },
                          onClose: { flow.refreshOSMOQueries() })
             // ISO 上限（02/8E pid 0x000F；手动曝光下同样可调）
             pillWheelRow("ISO MAX", current: st.isoMaxCode.flatMap { OSMOA4.isoMaxName($0) },
                          options: OSMOA4.isoMaxSteps.map(\.name),
                          initialIndex: st.isoMaxCode.flatMap { c in OSMOA4.isoMaxSteps.firstIndex { $0.code == c } },
-                         onPick: { i in
-                             guard i < OSMOA4.isoMaxSteps.count else { return }
-                             Task { _ = await flow.osmoCommand("ISO MAX") { try await $0.setISOMax(OSMOA4.isoMaxSteps[i].code) } }
-                         },
+                         onPick: { pickISOMax($0) },
                          onClose: { flow.refreshOSMOQueries() })
         }
+    }
+
+    /// 视频模式快门上限 1/25（真机实测；其他模式全表）
+    private var activeShutterRaws: [UInt32] {
+        st.captureMode == OSMOA4.modeVideo
+            ? OSMOA4.shutterSpeeds.filter { (OSMOA4.shutterSeconds(raw: $0) ?? 0) <= 1.0 / 25.0 + 1e-9 }
+            : OSMOA4.shutterSpeeds
+    }
+    private func pickExposureMode(auto: Bool) {
+        Task {
+            let ok = await flow.osmoCommand("曝光模式") { link in try await link.setExposureMode(auto: auto) }
+            if ok != nil {
+                await MainActor.run { flow.refreshOSMOQueries() }
+            }
+        }
+    }
+    private func pickShutter(_ i: Int) {
+        let raws = activeShutterRaws
+        guard i < raws.count else { return }
+        Task { _ = await flow.osmoCommand("快门") { try await $0.setShutter(raw: raws[i]) } }
+    }
+    private func pickISO(_ i: Int) {
+        let code = i == 0 ? UInt8(0) : OSMOA4.isoCodes[i - 1].code
+        Task { _ = await flow.osmoCommand("ISO") { try await $0.setISO(code) } }
+    }
+    private func pickISOMax(_ i: Int) {
+        guard i < OSMOA4.isoMaxSteps.count else { return }
+        Task { _ = await flow.osmoCommand("ISO MAX") { try await $0.setISOMax(OSMOA4.isoMaxSteps[i].code) } }
     }
 
     /// 视角值域按模式约束（OA4）：视频模式 窄/标准/广角/超广（是否可选随分辨率与帧率变化，
@@ -718,33 +795,55 @@ struct ControlScreenView: View {
             : [(0x02, "标准（畸变校正）"), (0x01, "广角")]
     }
 
-    /// 图像组（02/2C/42/38/44；视角/增稳已移入视频设置组）
+    /// 图像组（02/2C/42/38/44；视角/增稳已移入通用设置组）
     @ViewBuilder
     private var imagePills: some View {
         pillWheelRow("白平衡", current: st.wbName,
                      options: ["自动"] + OSMOA4.wbKelvins.map { "\($0)K" },
                      initialIndex: st.wbMode == 0x00 ? 0
                          : st.wbKelvin.flatMap { k in OSMOA4.wbKelvins.firstIndex(of: k) }.map { $0 + 1 },
-                     onPick: { i in
-                         let manual = i > 0
-                         let kelvin = i > 0 ? OSMOA4.wbKelvins[i - 1] : 5600
-                         Task { _ = await flow.osmoCommand("白平衡") { try await $0.setWhiteBalance(manual: manual, kelvin: kelvin) } }
-                     },
+                     onPick: { pickWhiteBalance($0) },
                      onClose: { flow.refreshOSMOQueries() })
         pillRow("色彩", current: st.colorProfileName,
                 options: OSMOA4.colorModes.map(\.name)) { i in
-            let ok = await flow.osmoCommand("色彩档位") { link in try await link.setColorProfile(OSMOA4.colorModes[i].code) }
-            if ok != nil {
-                await MainActor.run { flow.refreshOSMOQueries() }
-            }
+            pickColorProfile(i)
         }
         // 图像调节（App 侧预设，无独立相机字段——三方文档 02/8E pid 表均无此概念。
         // 实测映射：默认=锐度0/降噪0，人像=锐度0/降噪1，经 02/38+02/44 下发；自定义仅解锁手动调节）
         pillRow("图像调节", current: Self.imageTuneModes[imageTune],
                 options: Self.imageTuneModes) { i in
-            await MainActor.run { imageTune = i }
-            guard i < 2 else { return }   // 自定义不改动当前值
-            let denoise: Int8 = i == 0 ? 0 : 1
+            pickImageTune(i)
+        }
+        pillRow("锐度", current: st.sharpness.map(String.init),
+                options: OSMOA4.sharpnessRange.map(String.init),
+                disabled: imageTune != 2) { i in
+            pickSharpness(i)
+        }
+        pillRow("降噪", current: st.denoise.map(String.init),
+                options: OSMOA4.denoiseRange.map(String.init),
+                disabled: imageTune != 2) { i in
+            pickDenoise(i)
+        }
+    }
+
+    private func pickWhiteBalance(_ i: Int) {
+        let manual = i > 0
+        let kelvin = i > 0 ? OSMOA4.wbKelvins[i - 1] : 5600
+        Task { _ = await flow.osmoCommand("白平衡") { try await $0.setWhiteBalance(manual: manual, kelvin: kelvin) } }
+    }
+    private func pickColorProfile(_ i: Int) {
+        Task {
+            let ok = await flow.osmoCommand("色彩档位") { link in try await link.setColorProfile(OSMOA4.colorModes[i].code) }
+            if ok != nil {
+                await MainActor.run { flow.refreshOSMOQueries() }
+            }
+        }
+    }
+    private func pickImageTune(_ i: Int) {
+        Task { @MainActor in imageTune = i }
+        guard i < 2 else { return }   // 自定义不改动当前值
+        let denoise: Int8 = i == 0 ? 0 : 1
+        Task {
             let ok = await flow.osmoCommand("图像调节") { link in
                 try await link.setSharpness(0)
                 try await link.setDenoise(denoise)
@@ -753,17 +852,17 @@ struct ControlScreenView: View {
                 await MainActor.run { flow.refreshOSMOQueries() }
             }
         }
-        pillRow("锐度", current: st.sharpness.map(String.init),
-                options: OSMOA4.sharpnessRange.map(String.init),
-                disabled: imageTune != 2) { i in
+    }
+    private func pickSharpness(_ i: Int) {
+        Task {
             let ok = await flow.osmoCommand("锐度") { link in try await link.setSharpness(OSMOA4.sharpnessRange[i]) }
             if ok != nil {
                 await MainActor.run { flow.refreshOSMOQueries() }
             }
         }
-        pillRow("降噪", current: st.denoise.map(String.init),
-                options: OSMOA4.denoiseRange.map(String.init),
-                disabled: imageTune != 2) { i in
+    }
+    private func pickDenoise(_ i: Int) {
+        Task {
             let ok = await flow.osmoCommand("降噪") { link in try await link.setDenoise(OSMOA4.denoiseRange[i]) }
             if ok != nil {
                 await MainActor.run { flow.refreshOSMOQueries() }
@@ -789,47 +888,56 @@ struct ControlScreenView: View {
             pillWheelRow("延时间隔", current: st.lapseIntervalDeciS.map { Self.intervalText($0) },
                          options: OSMOA4.timelapseIntervalsTenths.map { Self.intervalText($0) },
                          initialIndex: st.lapseIntervalDeciS.flatMap { v in OSMOA4.timelapseIntervalsTenths.firstIndex(of: v) },
-                         onPick: { i in
-                             guard i < OSMOA4.timelapseIntervalsTenths.count else { return }
-                             let keep = st.lapseKeep ?? 0
-                             let dur = st.lapseDurationS ?? 0
-                             Task { _ = await flow.osmoCommand("延时间隔") { try await $0.setTimelapse(save: keep,
-                                 intervalTenths: OSMOA4.timelapseIntervalsTenths[i], durationS: dur) } }
-                         },
+                         onPick: { pickLapseInterval($0) },
                          onClose: { flow.refreshOSMOQueries() })
             pillWheelRow("拍摄时长", current: st.lapseDurationS.map { $0 == 0 ? "不限" : "\(Int($0) / 60)分" },
                          options: OSMOA4.timelapseDurationsS.map { $0 == 0 ? "不限" : "\(Int($0) / 60)分" },
                          initialIndex: st.lapseDurationS.flatMap { v in OSMOA4.timelapseDurationsS.firstIndex(of: v) },
-                         onPick: { i in
-                             guard i < OSMOA4.timelapseDurationsS.count else { return }
-                             let keep = st.lapseKeep ?? 0
-                             let interval = st.lapseIntervalDeciS ?? 20
-                             Task { _ = await flow.osmoCommand("拍摄时长") { try await $0.setTimelapse(save: keep,
-                                 intervalTenths: interval, durationS: OSMOA4.timelapseDurationsS[i]) } }
-                         },
+                         onPick: { pickLapseDuration($0) },
                          onClose: { flow.refreshOSMOQueries() })
             pillRow("保存", current: st.lapseKeep.flatMap { keep in
                 OSMOA4.lapseSaveModes.first { $0.code == keep }?.name
             }, options: OSMOA4.lapseSaveModes.map(\.name)) { i in
-                let ok = await flow.osmoCommand("延时保存") { link in
-                    try await link.setTimelapse(save: OSMOA4.lapseSaveModes[i].code,
-                                                intervalTenths: st.lapseIntervalDeciS ?? 20,
-                                                durationS: st.lapseDurationS ?? 0)
-                }
-                if ok != nil {
-                    await MainActor.run { flow.refreshOSMOQueries() }
-                }
+                pickLapseSave(i)
             }
         } else if st.captureMode == OSMOA4.modeHyperlapse {
             pillWheelRow("延时速率", current: st.lapseSpeed.map { $0 == 0 ? "自动" : "\($0)×" },
                          options: OSMOA4.hyperlapseSpeeds.map { $0 == 0 ? "自动" : "\($0)×" },
                          initialIndex: st.lapseSpeed.flatMap { v in OSMOA4.hyperlapseSpeeds.firstIndex(of: v) },
-                         onPick: { i in
-                             guard i < OSMOA4.hyperlapseSpeeds.count else { return }
-                             Task { _ = await flow.osmoCommand("延时速率") { try await $0.setHyperlapseSpeed(OSMOA4.hyperlapseSpeeds[i]) } }
-                         },
+                         onPick: { pickHyperlapseSpeed($0) },
                          onClose: { flow.refreshOSMOQueries() })
         }
+    }
+    private func pickLapseInterval(_ i: Int) {
+        guard i < OSMOA4.timelapseIntervalsTenths.count else { return }
+        let keep = st.lapseKeep ?? 0
+        let dur = st.lapseDurationS ?? 0
+        Task { _ = await flow.osmoCommand("延时间隔") { try await $0.setTimelapse(save: keep,
+            intervalTenths: OSMOA4.timelapseIntervalsTenths[i], durationS: dur) } }
+    }
+    private func pickLapseDuration(_ i: Int) {
+        guard i < OSMOA4.timelapseDurationsS.count else { return }
+        let keep = st.lapseKeep ?? 0
+        let interval = st.lapseIntervalDeciS ?? 20
+        Task { _ = await flow.osmoCommand("拍摄时长") { try await $0.setTimelapse(save: keep,
+            intervalTenths: interval, durationS: OSMOA4.timelapseDurationsS[i]) } }
+    }
+    private func pickLapseSave(_ i: Int) {
+        guard i < OSMOA4.lapseSaveModes.count else { return }
+        Task {
+            let ok = await flow.osmoCommand("延时保存") { link in
+                try await link.setTimelapse(save: OSMOA4.lapseSaveModes[i].code,
+                                            intervalTenths: st.lapseIntervalDeciS ?? 20,
+                                            durationS: st.lapseDurationS ?? 0)
+            }
+            if ok != nil {
+                await MainActor.run { flow.refreshOSMOQueries() }
+            }
+        }
+    }
+    private func pickHyperlapseSpeed(_ i: Int) {
+        guard i < OSMOA4.hyperlapseSpeeds.count else { return }
+        Task { _ = await flow.osmoCommand("延时速率") { try await $0.setHyperlapseSpeed(OSMOA4.hyperlapseSpeeds[i]) } }
     }
 
     /// 延时间隔显示：整秒不带小数（0.5s / 1s / 2s …）
