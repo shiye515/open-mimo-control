@@ -361,8 +361,8 @@ struct ControlScreenView: View {
     }
 
     /// 相机物理朝向（pid 0x0014 回读，2026-11-11 真机实测四向实锤）：
-    /// 0=上（正常竖拍）/ 1=左横置 / 2=下（倒置）/ 3=右横置。
-    /// 预览修正旋转：上 0°、左 90°（内容顺时针转回正）、下 180°、右 270°
+    /// 0=上（正常竖拍方向）/ 1=右横置 / 2=下（倒置）/ 3=左横置。
+    /// 预览修正旋转：上 0°、右 90°（内容顺时针转回正）、下 180°、左 270°
     private var previewCorrectionDegrees: Double {
         switch st.orientationCode ?? 0 {
         case 1: return 90
