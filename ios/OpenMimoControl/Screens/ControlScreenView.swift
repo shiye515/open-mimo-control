@@ -360,16 +360,12 @@ struct ControlScreenView: View {
         previewWidth * 9 / 16
     }
 
-    /// 相机物理朝向（pid 0x0014 回读，2026-11-11 真机实测四向实锤）：
-    /// 0=上（正常竖拍方向）/ 1=右横置 / 2=下（倒置）/ 3=左横置。
-    /// 预览修正旋转：上 0°、右 90°（内容顺时针转回正）、下 180°、左 270°
+    /// 相机朝向（pid 0x0014 回读，用户四向实测：0=上 / 1=左横置 / 2=下 / 3=右横置）。
+    /// 预览补偿旋转（2026-11-10 旋转会话真机验证正确的公式）：(4-码) % 4 × 90°
+    /// ——上 0°、左横置 270°、下 180°、右横置 90°（勿改直接映射，方向会反）
     private var previewCorrectionDegrees: Double {
-        switch st.orientationCode ?? 0 {
-        case 1: return 90
-        case 2: return 180
-        case 3: return 270
-        default: return 0
-        }
+        let code = Int(st.orientationCode ?? 0)
+        return Double((4 - code) % 4) * 90
     }
 
     /// 码流宽高比（分辨率码 0x67/0x5F/0x0C 为 4:3，其余 16:9）
