@@ -95,3 +95,6 @@ docs/**/*.pcapng
 docs/**/*.har
 # 个人参考资料（逆向笔记、官方 App 录屏、截图、第三方示例工程）
 docs/reference/
+
+# App 诊断日志快照（pull-app-log.sh 拉取产物，个人会话数据不入库）
+docs/protocol/captures/app-logs/
