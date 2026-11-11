@@ -12,6 +12,7 @@
 | [control-channel.md](control-channel.md) | 控制通道：帧格式、握手序列、命令载体、模式切换/录制命令、心跳 |
 | [live-view.md](live-view.md) | 实时预览流：传输、封装、加密现状与破解路径 |
 | [telemetry.md](telemetry.md) | 状态遥测：订阅机制、主题清单、各主题值结构 |
+| [topics-catalog.md](topics-catalog.md) | 00/99 命名主题总目录（20 状态主题 + camcap_* 能力主题 + 非 OA4 项）与订阅/推送机制 |
 
 ## 证据来源
 
