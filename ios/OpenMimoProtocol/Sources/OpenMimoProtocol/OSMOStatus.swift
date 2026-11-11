@@ -310,6 +310,8 @@ public final class OSMOStatusTracker {
 
     /// 未知主题名 → 首次出现日志一次
     private var loggedUnknownTopics: Set<String> = []
+    /// 已首见推送的主题（订阅生效验证：每主题日志一次）
+    private var firstReceipts: Set<String> = []
     /// 诊断日志（datalink 线程；OSMOCameraLink 接线）
     public var onLog: ((String) -> Void)?
     /// 固件动作事件（00/76 JSON event_id + 完整字典；OSMOCameraLink 接线到 StepLogger/失败提示）
@@ -457,6 +459,10 @@ public final class OSMOStatusTracker {
         let start = dataStart + 2
         guard start + dataLen <= p.count else { return }
         let data = Array(b[start..<start+dataLen])
+        // 首次收到任一主题推送时记录（验证订阅生效：20 主题应各出现一次「首见推送」）
+        if firstReceipts.insert(name).inserted {
+            onLog?("首见推送 \(name)（\(data.count)B）")
+        }
         switch name {
         case "cam_expo_param": parseExpoParam(data)
         case "cam_image_effect": parseImageEffect(data)
