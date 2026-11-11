@@ -1272,6 +1272,8 @@ struct ControlScreenView: View {
             ("电池电压", st.batteryVoltageMV.map { "\($0) mV" } ?? "—"),
             ("电池电流", st.batteryCurrentMA.map { $0 < 0 ? "放电 \(-$0) mA" : "充电 \($0) mA" } ?? "—"),
             ("电池温度", st.batteryTempDeciC.map { String(format: "%.1f °C", Double($0) / 10) } ?? "—"),
+            ("相机朝向", st.orientationCode.map { ["上", "左横置", "下", "右横置"][Int($0) % 4] } ?? "—"),
+            ("弱光增稳", st.lowLightCode.map { $0 == 1 ? "开" : "关" } ?? "—"),
             ("延时设置", lapseText),
             ("预览帧数", "\(flow.osmoFrameCount)"),
             ("状态更新", st.lastUpdate.map { Self.timeText($0) } ?? "—"),

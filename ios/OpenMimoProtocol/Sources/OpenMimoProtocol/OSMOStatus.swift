@@ -320,6 +320,11 @@ public final class OSMOStatusTracker {
     var pendingParamType: UInt16?
     /// pid 0x000A 上次回读值（翻转检测）
     private var lastParam0A: UInt8?
+    /// 语义已实锤的参数 pid（不进未知信号区；unknown-signals-report）
+    private let knownParameterPids: Set<UInt16> = [
+        OSMOA4.paramPro, OSMOA4.paramEIS, OSMOA4.paramFOV, OSMOA4.paramISOMax,
+        OSMOA4.paramLowLight, OSMOA4.paramOrientation,
+    ]
 
     public init() {}
 
@@ -474,10 +479,15 @@ public final class OSMOStatusTracker {
                     | UInt32(data[2]) << 16 | UInt32(data[3]) << 24
             }
         case "cam_fov", "shutter_param", "cam_photo_param", "cam_photo_param_new",
-             "temp_curve", "camcap_common", "cam_audio_status_v2", "cam_imu_calib_info",
-             "cam_video_param_v2", "cam_storage", "cam_status", "cam_custom_mode_params",
-             "cam_magnifier_status", "v_quality_enhance_status", "audio_timecode_status",
-             "timecode_info":
+             "temp_curve", "camcap_common":
+            // 语义未实锤的主题：原始数据段记录（值变化才更新），诊断面板展示供抓包 diff
+            recordRawTopic(name, data)
+        case "cam_audio_status_v2", "cam_imu_calib_info", "cam_video_param_v2", "cam_storage",
+             "cam_status", "cam_custom_mode_params", "cam_magnifier_status",
+             "v_quality_enhance_status", "audio_timecode_status", "timecode_info":
+            // 语义已明确的录制态/校准类主题（音频电平表、录制时码、容量更新等），
+            // 不进未知信号区；具体字段布局待后续抓包 diff，需要时在此接入专有解析
+            break
             // 布局未实锤：原始数据段记录（值变化才更新），诊断面板展示供抓包 diff
             recordRawTopic(name, data)
         default:
@@ -597,8 +607,8 @@ public final class OSMOStatusTracker {
         snapshot.queryErrors.removeValue(forKey: "param")
         guard p.count >= 7, p[1] == 0x00, p[2] == 0x01 else { return }
         let valLen = Int(p[5])
-        if valLen > 0, p.count >= 6 + valLen {
-            // 未解析 pid 的原始回读（诊断观测；已知 pid 亦记录便于对照）
+        if valLen > 0, p.count >= 6 + valLen, !knownParameterPids.contains(type) {
+            // 仅语义未明确的 pid 记录原始回读（语义已实锤的进快照专属字段，不进未知区）
             snapshot.rawParams[type] = p[6..<6+valLen].map { String(format: "%02x", $0) }.joined()
         }
         if type == 0x000A, p.count >= 7 {

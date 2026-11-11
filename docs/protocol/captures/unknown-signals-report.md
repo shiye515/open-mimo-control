@@ -32,7 +32,7 @@
 | pid | GET 次数 | 应答观测 | 备注 |
 |---|---|---|---|
 | 0x0006 | ×204 | 恒负响应（d9/df） | 不可读 |
-| 0x000A | ×202 | **01 ×175 / 00 ×27**（唯一有变化的未知 pid；两 会话分布不同，含义未定） | 值得抓包定位 |
+| 0x000A | ×202 | **01 ×175 / 00 ×27**（唯一有变化的未知 pid） | ⏳ 诊断观测已接入（翻转日志），语义待操作对照定位 |
 | 0x0015 | ×203 | 恒 E3 | 该模式不支持读 |
 | 0x0018 | ×202 | 恒 4 字节值 `00000000` | |
 | 0x0020 | ×205 | 恒 `02` | |
@@ -53,21 +53,19 @@ cam_lens_state / cam_portrait_mode，另 cam_storage 用 02/DC 命令替代）�
 
 **未订阅且未解析（三方也无布局）**：
 
-| 主题 | 推送次数 | 价值推断 |
+| 主题 | 推送次数 | 状态 |
 |---|---|---|
-| cam_record_time | ×826 | 录制秒数推送（可替代 02/80 内的 clipSeconds） |
-| cam_fov | ×415 | FOV 推送（可替代 pid 0x0009 轮询，变焦联动更实时） |
-| cam_photo_param | ×426 | 照片参数（含倒计时当前值？待 diff） |
-| shutter_param | ×414 | 快门推送（可替代 02/29 轮询） |
-| temp_curve | ×166 | 温度曲线（机身/电池温度展示增强） |
-| cam_audio_status_v2 | ×826 | 音频状态 |
-| cam_imu_calib_info | ×825 | IMU 校准信息 |
-| cam_custom_mode_params | ×414 | 自定义模式参数 |
-| cam_magnifier_status | ×414 | 放大镜状态 |
-| v_quality_enhance_status | ×414 | 画质增强状态 |
-| audio_timecode_status / timecode_info | ×414/×168 | 时码 |
-| cam_status（命名主题形式） | ×450 | 内容同 02/80 |
-| camcap_common | ×2 | **能力表**：数据段 `010700030b0010011103`（含倒计时档位线索） |
+| cam_record_time | ×826 | **✅ 已解析接入**（u32 秒 @0，REC 计时推送驱动） |
+| cam_audio_status_v2 | ×826 | **✅ 语义确认**（录制音频电平表：录制时电平字节实时跳动，真机观测 2026-11-10） |
+| timecode_info | ×168 | **✅ 语义确认**（录制时码：时/分/秒 @11-13 录制中递增，真机观测 2026-11-10） |
+| cam_storage | ×415 | **✅ 语义确认**（录制写入时容量更新；App 用 02/DC 命令替代，行为一致） |
+| cam_fov | ×415 | 16B 数值段（A/B 随流宽高比变，疑似传感器有效区/校准）——布局未定，原始记录 |
+| cam_photo_param | ×426 | 13B，offset 11 变化（疑似倒计时相关）——待 diff |
+| shutter_param | ×414 | 16B 全零（会话未动快门）——原始记录 |
+| temp_curve | ×166 | 3B（该会话温度平稳）——原始记录 |
+| camcap_common | ×2 | **能力表** `010700030b0010011103`（含倒计时档位线索）——原始记录 |
+| cam_imu_calib_info / cam_custom_mode_params / cam_magnifier_status / v_quality_enhance_status | ×414 | 低价值/静态，原始记录 |
+| cam_status（命名主题形式） | ×450 | 内容同 02/80（已解析，复用 parseCameraStatus） |
 
 ## 4. 已解析命令的未解析区间
 
