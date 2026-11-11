@@ -360,11 +360,16 @@ struct ControlScreenView: View {
         previewWidth * 9 / 16
     }
 
-    /// 相机旋转象限（pid 0x0014 回读）：0/1/2/3 = 逆时针 90° 象限数。
-    /// 预览视图顺时针旋转 (4-象限)%4 × 90° 跟随相机（2026-11-10 旋转抓包实锤：
-    /// 顺时针转 90/180/270° → 象限 3/2/1）；外层固定黑底不旋转
-    private var previewRotationQuarters: Int {
-        Int(st.orientationCode ?? 0) % 4
+    /// 相机物理朝向（pid 0x0014 回读，2026-11-11 真机实测四向实锤）：
+    /// 0=上（正常竖拍）/ 1=左横置 / 2=下（倒置）/ 3=右横置。
+    /// 预览修正旋转：上 0°、左 90°（内容顺时针转回正）、下 180°、右 270°
+    private var previewCorrectionDegrees: Double {
+        switch st.orientationCode ?? 0 {
+        case 1: return 90
+        case 2: return 180
+        case 3: return 270
+        default: return 0
+        }
     }
 
     /// 码流宽高比（分辨率码 0x67/0x5F/0x0C 为 4:3，其余 16:9）
@@ -385,10 +390,10 @@ struct ControlScreenView: View {
             LivePreviewView(flow: flow)
                 .frame(height: previewHeight)
                 .frame(maxWidth: .infinity)
-                // 跟随相机旋转；奇数象限（垂直放置）缩放 1/码流宽高比，使旋转后内容
-                // 高度顶满卡片（4:3 流 0.75 / 16:9 流 9:16），仅左右留黑边
-                .rotationEffect(.degrees(Double((4 - previewRotationQuarters) % 4) * 90))
-                .scaleEffect(previewRotationQuarters % 2 == 1 ? 1 / streamAspect : 1)
+                // 朝向修正（pid 0x0014：0 上/1 左/2 下/3 右，真机实测）：内容转回正；
+                // 左右横置（90°/270°）时缩放 1/码流宽高比，使画面高度顶满仅左右黑边
+                .rotationEffect(.degrees(previewCorrectionDegrees))
+                .scaleEffect((Int(st.orientationCode ?? 0)) % 2 == 1 ? 1 / streamAspect : 1)
             if gridMode >= 1 {
                 FramingGridOverlay(mode: gridMode)
                     .frame(height: previewHeight)
@@ -413,7 +418,7 @@ struct ControlScreenView: View {
                     .padding(8)
             }
         }
-        .animation(.easeInOut(duration: 0.35), value: previewRotationQuarters)
+        .animation(.easeInOut(duration: 0.35), value: st.orientationCode ?? 0)
         .simultaneousGesture(MagnifyGesture()
             .onChanged { v in
                 // 方向+时间：捏合期间按 ~10Hz 发方向命令，相机持续变焦
