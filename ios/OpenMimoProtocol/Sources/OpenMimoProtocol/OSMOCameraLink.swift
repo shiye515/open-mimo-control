@@ -674,29 +674,38 @@ public final class OSMOCameraLink {
     /// 当前拍摄模式下的参数查询（一次一条，间隔 0.3s——osmocam §5.9：单发等应答）。
     /// 回读走 statusTracker（02/19/1F/2B/29/2D/13/8E 应答解析），UI 以回读为准。
     private func sendStatusQueries() {
-        let queries: [(UInt8, UInt8, Data)] = [
-            (0x02, 0x19, Data()),   // 视频格式（分辨率+fps 码；照片模式 DF）
+        // 按模式裁剪查询：无效查询（如照片模式读视频格式）会被相机 DF 拒绝，直接不发
+        let mode = statusTracker.snapshot.captureMode
+        let manual = statusTracker.snapshot.exposureMode == 0x04
+        var queries: [(UInt8, UInt8, Data)] = [
             (0x02, 0x1F, Data()),   // 曝光模式
             (0x02, 0x2B, Data()),   // ISO
-            (0x02, 0x29, Data()),   // 快门（自动曝光 DF）
             (0x02, 0x2D, Data()),   // 白平衡
-            (0x02, 0x13, Data()),   // 照片格式（非照片模式 DF）
             (0x02, 0x8E, OSMOA4.parameterGetPayload(type: OSMOA4.paramFOV)),
             (0x02, 0x8E, OSMOA4.parameterGetPayload(type: OSMOA4.paramEIS)),
             (0x02, 0x8E, OSMOA4.parameterGetPayload(type: OSMOA4.paramISOMax)),
             (0x02, 0x8E, OSMOA4.parameterGetPayload(type: OSMOA4.paramPro)),
             (0x02, 0x8E, OSMOA4.parameterGetPayload(type: OSMOA4.paramLowLight)),
-            // 未解析 pid 轮询（诊断观测；06/28 恒负响应、15 恒 E3——负响应归因登记见 noteParameterRequest）
+            // 未解析 pid 轮询（诊断观测；负响应按 noteParameterRequest 登记的 pid 归因）
             (0x02, 0x8E, OSMOA4.parameterGetPayload(type: 0x000A)),
             (0x02, 0x8E, OSMOA4.parameterGetPayload(type: 0x0018)),
             (0x02, 0x8E, OSMOA4.parameterGetPayload(type: 0x0020)),
             (0x02, 0x8E, OSMOA4.parameterGetPayload(type: 0x0029)),
         ]
+        if mode == OSMOA4.modePhoto {
+            queries.insert((0x02, 0x13, Data()), at: 0)   // 照片格式（仅照片模式）
+        } else {
+            queries.insert((0x02, 0x19, Data()), at: 0)   // 视频格式（照片模式 DF）
+        }
+        if manual {
+            queries.append((0x02, 0x29, Data()))          // 快门（仅手动曝光可读）
+        }
         for (i, q) in queries.enumerated() {
             queue.asyncAfter(deadline: .now() + Double(i) * 0.3) { [weak self] in
                 guard let self, !self.stopped else { return }
-                if q.0 == 0x02, q.1 == 0x8E, q.2.count >= 2 {
-                    self.statusTracker.noteParameterRequest(UInt16(q.2[0]) | (UInt16(q.2[1]) << 8))
+                if q.0 == 0x02, q.1 == 0x8E, q.2.count >= 4 {
+                    // pid 在 GET 载荷的 [2],[3]（[0]=读操作 00，[1]=01 常量）
+                    self.statusTracker.noteParameterRequest(UInt16(q.2[2]) | (UInt16(q.2[3]) << 8))
                 }
                 self.send(cmdSet: q.0, cmdId: q.1, payload: q.2)
             }

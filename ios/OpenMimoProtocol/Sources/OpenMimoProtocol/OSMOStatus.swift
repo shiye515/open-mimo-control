@@ -463,6 +463,11 @@ public final class OSMOStatusTracker {
         if firstReceipts.insert(name).inserted {
             onLog?("首见推送 \(name)（\(data.count)B）")
         }
+        // 临时诊断：cam_expo_param / cam_lapse_param 在 20 主题会话中零推送（其余 18 正常），
+        // 逐帧记录以定位是「相机未推」还是「解析丢弃」
+        if name == "cam_expo_param" || name == "cam_lapse_param" {
+            onLog?("[diag] \(name) 推送 \(data.count)B: \(data.map { String(format: "%02x", $0) }.joined().prefix(40))")
+        }
         switch name {
         case "cam_expo_param": parseExpoParam(data)
         case "cam_image_effect": parseImageEffect(data)
