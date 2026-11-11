@@ -88,7 +88,8 @@ public final class CameraBleWaker: NSObject, ObservableObject, CBCentralManagerD
     private func sendKeepaliveTick() {
         guard keepAliveOn, peripheral != nil, writeChar != nil else { return }
         let frame = buildDUML(src: 0x02, dst: 0xF0, seq: 0x802B, ct: 0x40, set: 0x00, id: 0x2B, pl: [0x01, 0x01])
-        sendVia(frame, char: writeChar, label: "BLE-keepalive(00,2b)")
+        // 保活帧 1s 一次：静默发送（协议节奏不能降频，但日志只记失败不记成功）
+        sendVia(frame, char: writeChar, label: "BLE-keepalive(00,2b)", quiet: true)
     }
     private var macScanCompletion: (([UInt8]?) -> Void)?
     private var macScanDeadline: Date?
@@ -185,13 +186,15 @@ public final class CameraBleWaker: NSObject, ObservableObject, CBCentralManagerD
     }
 
     /// 指定特征发送（FFF3/FFF5 双通道探测用）。
-    private func sendVia(_ frame: [UInt8], char: CBCharacteristic?, label: String) {
+    private func sendVia(_ frame: [UInt8], char: CBCharacteristic?, label: String, quiet: Bool = false) {
         guard let char else {
             log("✗ 发送失败（写特征未就绪）：\(label)")
             return
         }
-        log("→ 发送\(label) [\(frame.count)B] via \(char.uuid)")
-        logFrame("TX-\(label)", Data(frame))
+        if !quiet {
+            log("→ 发送\(label) [\(frame.count)B] via \(char.uuid)")
+            logFrame("TX-\(label)", Data(frame))
+        }
         peripheral?.writeValue(Data(frame), for: char, type: .withResponse)
     }
 
