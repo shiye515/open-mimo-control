@@ -624,14 +624,33 @@ public final class OSMOCameraLink {
         "audio_timecode_status", "timecode_info", "temp_curve", "cam_imu_calib_info",
     ]
 
+    /// 能力表探测组（三方 §8.4 记录的 camcap_* 全家族，OA4 支持性未验证）：
+    /// 2026-11-11 用户要求全量订阅测试，应答逐一确认后裁剪不支持的
+    static let capabilityProbeTopics = [
+        "camcap_base", "camcap_video_format", "camcap_iso", "camcap_shutter",
+        "camcap_photo_size", "camcap_wb", "camcap_exposure_mode", "camcap_color_mode",
+        "camcap_fov", "camcap_eis", "camcap_sharpness", "camcap_denoise",
+        "camcap_photo_timer_interval", "camcap_timelapse_duration", "camcap_hyperlapse_ratio",
+        "camcap_capture_aspect_type", "camcap_iso_auto_max", "camcap_countdown",
+        "camcap_loop_video_duration", "camcap_slowmotion_ratio",
+    ]
+
     private func sendStatusSubscriptions() {
-        statusTracker.expectSubscriptionAcks(Self.telemetryTopics)
+        // 应答按发送顺序逐条回来，登记合并清单一次（两次调用会互相覆盖）
+        statusTracker.expectSubscriptionAcks(Self.telemetryTopics + Self.capabilityProbeTopics)
         for (i, name) in Self.telemetryTopics.enumerated() {
             send(cmdSet: 0x00, cmdId: 0x99,
                  payload: Self.topicSubscription(name: name, id: 0x6A00 + UInt32(i)),
                  receiver: addrTopics)
         }
         log("[osmo] 已订阅 \(Self.telemetryTopics.count) 个状态主题")
+        // 能力表探测：第二批订阅（id 错开 0x100），应答确认 OA4 是否支持逐项能力订阅
+        for (i, name) in Self.capabilityProbeTopics.enumerated() {
+            send(cmdSet: 0x00, cmdId: 0x99,
+                 payload: Self.topicSubscription(name: name, id: 0x6B00 + UInt32(i)),
+                 receiver: addrTopics)
+        }
+        log("[osmo] 已订阅 \(Self.capabilityProbeTopics.count) 个能力主题（探测）")
     }
 
     /// osmocam protocol.py topic_subscription：
