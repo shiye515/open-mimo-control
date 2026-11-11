@@ -59,6 +59,12 @@ public final class CameraBleWaker: NSObject, ObservableObject, CBCentralManagerD
         }
     }
 
+    /// BLE 会话是否已建立（peripheral + 写特征就绪）——
+    /// 复用直连路径里据此跳过冗余的扫描/唤醒循环（keepalive 已在保活）
+    public var bleSessionReady: Bool {
+        keepAliveOn && peripheral != nil && writeChar != nil
+    }
+
     private var keepAliveOn = false
     private var keepaliveWorkItem: DispatchWorkItem?
 

@@ -367,6 +367,12 @@ final class ConnectionFlow: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             CameraBleWaker.shared.keepBLEAlive(true)
+            // BLE 会话已建立（如完整连接流程建立过）时跳过扫描/唤醒循环：
+            // 此时相机已停 BLE 广播，扫描必然 45s×3 超时并触发 3 次唤醒广播（日志噪音源）
+            if CameraBleWaker.shared.bleSessionReady {
+                log(.waking, "BLE 会话已建立", content: "keepalive 保活中 → 视频推流恢复")
+                return
+            }
             for round in 1...3 {
                 log(.waking, "后台 BLE 会话 第\(round)/3 轮", content: "若相机屏幕弹 OSMO 提示，请按确认！")
                 if await CameraBleWaker.shared.connectAndGetCredentials(timeout: 45) != nil {
