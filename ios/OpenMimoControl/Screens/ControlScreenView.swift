@@ -368,6 +368,7 @@ struct ControlScreenView: View {
         return Double((4 - code) % 4) * 90
     }
 
+
     /// 码流宽高比（分辨率码 0x67/0x5F/0x0C 为 4:3，其余 16:9）
     private var streamAspect: CGFloat {
         switch st.videoResolutionCode {

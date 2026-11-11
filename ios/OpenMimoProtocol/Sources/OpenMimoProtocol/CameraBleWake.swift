@@ -68,19 +68,24 @@ public final class CameraBleWaker: NSObject, ObservableObject, CBCentralManagerD
     private var keepAliveOn = false
     private var keepaliveWorkItem: DispatchWorkItem?
 
+    /// BLE 保活间隔（秒）。写死 60s：2026-11-11 真机 A/B 实验实测 60s 仍流畅预览
+    /// （5s/30s/60s 均无中断；三方 osmocam §3.3 的 1s 节奏为 Nano 机型参考）
+    private var keepaliveInterval: Double { 60.0 }
+
     private func startKeepaliveLoop() {
         keepaliveWorkItem?.cancel()
         let first = nextKeepaliveItem()
         keepaliveWorkItem = first
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: first)
+        DispatchQueue.main.asyncAfter(deadline: .now() + keepaliveInterval, execute: first)
     }
 
     private func nextKeepaliveItem() -> DispatchWorkItem {
+        let interval = keepaliveInterval
         let w = DispatchWorkItem { [weak self] in
             guard let self, self.keepAliveOn else { return }
             self.sendKeepaliveTick()
             self.keepaliveWorkItem = self.nextKeepaliveItem()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: self.keepaliveWorkItem!)
+            DispatchQueue.main.asyncAfter(deadline: .now() + interval, execute: self.keepaliveWorkItem!)
         }
         return w
     }
@@ -88,8 +93,7 @@ public final class CameraBleWaker: NSObject, ObservableObject, CBCentralManagerD
     private func sendKeepaliveTick() {
         guard keepAliveOn, peripheral != nil, writeChar != nil else { return }
         let frame = buildDUML(src: 0x02, dst: 0xF0, seq: 0x802B, ct: 0x40, set: 0x00, id: 0x2B, pl: [0x01, 0x01])
-        // 保活帧 1s 一次：静默发送（协议节奏不能降频，但日志只记失败不记成功）
-        sendVia(frame, char: writeChar, label: "BLE-keepalive(00,2b)", quiet: true)
+        sendVia(frame, char: writeChar, label: "BLE-keepalive(00,2b)")
     }
     private var macScanCompletion: (([UInt8]?) -> Void)?
     private var macScanDeadline: Date?
@@ -186,15 +190,13 @@ public final class CameraBleWaker: NSObject, ObservableObject, CBCentralManagerD
     }
 
     /// 指定特征发送（FFF3/FFF5 双通道探测用）。
-    private func sendVia(_ frame: [UInt8], char: CBCharacteristic?, label: String, quiet: Bool = false) {
+    private func sendVia(_ frame: [UInt8], char: CBCharacteristic?, label: String) {
         guard let char else {
             log("✗ 发送失败（写特征未就绪）：\(label)")
             return
         }
-        if !quiet {
-            log("→ 发送\(label) [\(frame.count)B] via \(char.uuid)")
-            logFrame("TX-\(label)", Data(frame))
-        }
+        log("→ 发送\(label) [\(frame.count)B] via \(char.uuid)")
+        logFrame("TX-\(label)", Data(frame))
         peripheral?.writeValue(Data(frame), for: char, type: .withResponse)
     }
 
