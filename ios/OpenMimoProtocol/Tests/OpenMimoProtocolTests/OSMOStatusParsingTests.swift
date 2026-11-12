@@ -95,21 +95,105 @@ final class OSMOStatusParsingTests: XCTestCase {
 
     func testExpoParamTopic() {
         var d = [UInt8](repeating: 0, count: 24)
-        d[6] = 0x13                       // EV = +1 EV (19-10=9/3=3)
-        d[15] = 0x07                      // 测光 = -1 EV（07=-3EV…10=0…19=+3EV）
+        d[6] = 0x13                       // EV 码 0x13（滑动窗口策略下需写入登记后回读）
+        d[15] = 0x07                      // 测光 = -1 EV（07=-3EV…16=0…19=+3EV）
         d.replaceSubrange(16...19, with: le32(3200))           // 生效 ISO 3200
         d.replaceSubrange(20...21, with: le16(0x8019))         // 生效快门 1/25s
 
         let t = OSMOStatusTracker()
+
+        // 未登记写入意图：EV 不更新（宁缺勿错——固定偏移 @6 在滑动窗口下不可靠）
         t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
                  payload: topicFrame(name: "cam_expo_param", data: d))
-
-        XCTAssertEqual(t.snapshot.expoCompValue, 0x13)
-        XCTAssertEqual(t.snapshot.expoCompName, "+1.0")      // 0x13：码 16=0EV → +1.0（一位小数）
+        XCTAssertNil(t.snapshot.expoCompValue)
         XCTAssertEqual(t.snapshot.lightMeterName, "-3.0 EV")
         XCTAssertEqual(t.snapshot.effectiveISO, 3_200)
         XCTAssertEqual(t.snapshot.effectiveShutter, 0x8019)
         XCTAssertEqual(t.snapshot.effectiveShutterName, "1/25 s")
+
+        // 锚定：登记码在头部唯一出现 → 锁定位置并消费登记
+        t.lastSetEVCode = 0x13
+        t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
+                 payload: topicFrame(name: "cam_expo_param", data: d))
+        XCTAssertEqual(t.snapshot.expoCompValue, 0x13)
+        XCTAssertEqual(t.snapshot.expoCompName, "+1.0")      // 0x13：码 16=0EV → +1.0（一位小数）
+        XCTAssertNil(t.lastSetEVCode)
+
+        // 相机端改动同步：无登记时，锚定偏移处的字节变化 → EV 跟随
+        var d2 = d
+        d2[6] = 0x0A                       // 相机端把 EV 从 +1.0 改到 -2.0
+        t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
+                 payload: topicFrame(name: "cam_expo_param", data: d2))
+        XCTAssertEqual(t.snapshot.expoCompValue, 0x0A)
+        XCTAssertEqual(t.snapshot.expoCompName, "-2.0")
+
+        // 撞车：登记码在头部出现 ≥2 → 保留登记，不锁定不更新
+        var d3 = d
+        d3[3] = 0x13
+        t.lastSetEVCode = 0x13
+        t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
+                 payload: topicFrame(name: "cam_expo_param", data: d3))
+        XCTAssertEqual(t.snapshot.expoCompValue, 0x0A)
+        XCTAssertEqual(t.lastSetEVCode, 0x13)
+
+        // 读数出格：锚定偏移处字节不在 EV 码域（0x07-0x19）→ 失锁，后续推送不再改写
+        t.lastSetEVCode = nil
+        var d4 = d
+        d4[6] = 0x20
+        t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
+                 payload: topicFrame(name: "cam_expo_param", data: d4))
+        XCTAssertEqual(t.snapshot.expoCompValue, 0x0A)
+        var d5 = d
+        d5[6] = 0x19
+        t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
+                 payload: topicFrame(name: "cam_expo_param", data: d5))
+        XCTAssertEqual(t.snapshot.expoCompValue, 0x0A)
+
+        // 尾段同码不干扰：锚点码与测光字节 @15 相同仍可锁定（头部扫描不含 @15+）
+        var d6 = d
+        d6[6] = 0x07                       // EV 码 0x07 = -3.0，与 d[15] 测光字节相同
+        t.lastSetEVCode = 0x07
+        t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
+                 payload: topicFrame(name: "cam_expo_param", data: d6))
+        XCTAssertEqual(t.snapshot.expoCompValue, 0x07)
+
+        // 模式切换重置锚定：偏移失效后改值不再跟随，待重新写入锚定
+        var cs = [UInt8](repeating: 0, count: 58)
+        cs[57] = 0x01                      // 拍摄模式 → 视频（与当前 nil 不同，触发重置）
+        t.handle(cmdSet: 0x02, cmdId: 0x80, sender: 0x01, payload: Data(cs))
+        var d7 = d
+        d7[6] = 0x19
+        t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
+                 payload: topicFrame(name: "cam_expo_param", data: d7))
+        XCTAssertEqual(t.snapshot.expoCompValue, 0x07)
+
+        // 同值曝光模式应答不重置锚定（02/1F 可能以推送/重查应答形式重复到达）
+        t.handle(cmdSet: 0x02, cmdId: 0x1F, sender: 0x01, payload: Data([0x00, 0x04]))
+        var d8 = d
+        d8[6] = 0x0A
+        t.lastSetEVCode = 0x0A
+        t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
+                 payload: topicFrame(name: "cam_expo_param", data: d8))
+        XCTAssertEqual(t.snapshot.expoCompValue, 0x0A)     // 重新锚定
+        t.handle(cmdSet: 0x02, cmdId: 0x1F, sender: 0x01, payload: Data([0x00, 0x04]))
+        var d9 = d
+        d9[6] = 0x19
+        t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
+                 payload: topicFrame(name: "cam_expo_param", data: d9))
+        XCTAssertEqual(t.snapshot.expoCompValue, 0x19)     // 同值应答未杀锚定，回读仍跟随
+    }
+
+    func testVideoParamV2Topic() {
+        let t = OSMOStatusTracker()
+        // OA4 实测布局（2026-11-11 抓包）：@0 分辨率码、@1 帧率码 u8；
+        // 6 次分辨率变化 + 2 次帧率变化（60↔24）与用户操作逐一对应
+        t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
+                 payload: topicFrame(name: "cam_video_param_v2", data: [0x10, 0x06]))
+
+        XCTAssertEqual(t.snapshot.videoResolutionCode, 0x10)
+        XCTAssertEqual(t.snapshot.videoResolutionName, "4K 16:9")
+        XCTAssertEqual(t.snapshot.videoFpsCode, 0x06)
+        XCTAssertEqual(t.snapshot.videoFpsName, "60")
     }
 
     func testImageEffectAndLapseTopics() {

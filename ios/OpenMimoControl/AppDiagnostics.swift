@@ -43,24 +43,28 @@ final class AppDiagnostics: ObservableObject {
         return all.joined(separator: "\n")
     }
 
-    /// 追加写沙盒文件（异步、工具队列；超 256KB 重建）。devicectl 可直接拉取。
+    /// 落盘专用串行队列：并发全局队列上多把 FileHandle 同时 seekToEnd/write 会交错截断
+    /// （真机日志出现半行碎片、256KB 重建后写入停滞），必须串行化
+    private static let logQueue = DispatchQueue(label: "diag.log.append", qos: .utility)
+
+    /// 追加写沙盒文件（串行队列；超 256KB 环形重建——保留尾部 3/4，最近的测试事件
+    /// 不因爆量整体丢失）。devicectl 可直接拉取。
     private func appendToFile(_ line: String) {
         let url = Self.fileURL
-        DispatchQueue.global(qos: .utility).async {
-            do {
-                if let handle = try? FileHandle(forWritingTo: url) {
-                    defer { try? handle.close() }
-                    let size = (try? handle.seekToEndOfFile()) ?? 0
-                    if size > Self.maxFileBytes {
-                        handle.truncateFile(atOffset: 0)
-                    }
-                    handle.seekToEndOfFile()
-                    handle.write(Data((line + "\n").utf8))
-                } else {
-                    try (line + "\n").write(to: url, atomically: true, encoding: .utf8)
+        Self.logQueue.async {
+            if let handle = try? FileHandle(forWritingTo: url) {
+                defer { try? handle.close() }
+                let size = (try? handle.seekToEndOfFile()) ?? 0
+                if size > Self.maxFileBytes {
+                    let keep = Self.maxFileBytes * 3 / 4
+                    let data = (try? Data(contentsOf: url)) ?? Data()
+                    handle.truncateFile(atOffset: 0)
+                    handle.write(data.suffix(keep))
                 }
-            } catch {
-                // 落盘失败不影响 UI 日志
+                handle.seekToEndOfFile()
+                handle.write(Data((line + "\n").utf8))
+            } else {
+                try? Data((line + "\n").utf8).write(to: url, options: .atomic)
             }
         }
     }

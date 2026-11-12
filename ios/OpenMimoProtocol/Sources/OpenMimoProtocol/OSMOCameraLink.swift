@@ -693,9 +693,7 @@ public final class OSMOCameraLink {
             (0x02, 0x8E, OSMOA4.parameterGetPayload(type: 0x0029)),
         ]
         if mode == OSMOA4.modePhoto {
-            queries.insert((0x02, 0x13, Data()), at: 0)   // 照片格式（仅照片模式）
-        } else {
-            queries.insert((0x02, 0x19, Data()), at: 0)   // 视频格式（照片模式 DF）
+            queries.insert((0x02, 0x13, Data()), at: 0)   // 照片格式（仅照片模式；视频格式由 cam_video_param_v2 推送驱动）
         }
         if manual {
             queries.append((0x02, 0x29, Data()))          // 快门（仅手动曝光可读）
@@ -917,9 +915,19 @@ public final class OSMOCameraLink {
         }
     }
 
-    /// DUML 帧 → 状态跟踪器；快照变化节流 0.5s 发一次 onStatus
+    /// DUML 帧 → 状态跟踪器；快照变化节流 0.5s 发一次 onStatus。
+    /// handle 在 datalink 队列执行：tracker 状态与 noteEVWrite / noteParameterRequest 等
+    /// 登记路径天然串行（NW 接收回调线程、调用方线程都不再触碰 tracker）
     private func feedStatus(cmdSet: UInt8, cmdId: UInt8, sender: UInt8, payload: Data) {
-        statusTracker.handle(cmdSet: cmdSet, cmdId: cmdId, sender: sender, payload: payload)
+        queue.async { [weak self] in
+            self?.statusTracker.handle(cmdSet: cmdSet, cmdId: cmdId, sender: sender, payload: payload)
+        }
+    }
+
+    /// 链路队列登记最近写入的 EV 码（setEV 从调用方线程调用，跳转后与解析串行；
+    /// cam_expo_param 滑动窗口解析锚点）
+    func noteEVWrite(_ code: UInt8) {
+        queue.async { [weak self] in self?.statusTracker.lastSetEVCode = code }
     }
 
     private func answerRequest(cmdSet: UInt8, cmdId: UInt8, sender: UInt8) {

@@ -322,6 +322,11 @@ public final class OSMOStatusTracker {
     var pendingParamType: UInt16?
     /// pid 0x000A 上次回读值（翻转检测）
     private var lastParam0A: UInt8?
+    /// 最近一次 App 写入的 EV 码（noteEVWrite 经链路队列登记；cam_expo_param 据此锚定 EV 字节）
+    var lastSetEVCode: UInt8?
+    /// EV 锚定偏移：锁定成功后记录 EV 字节在窗口头部的位置；同模式内按偏移持续回读
+    /// （相机端改动由此同步），模式切换或读数出格时重置、待下次写入重新锚定
+    private var evAnchorOffset: Int?
     /// 语义已实锤的参数 pid（不进未知信号区；unknown-signals-report）
     private let knownParameterPids: Set<UInt16> = [
         OSMOA4.paramPro, OSMOA4.paramEIS, OSMOA4.paramFOV, OSMOA4.paramISOMax,
@@ -397,7 +402,10 @@ public final class OSMOStatusTracker {
         snapshot.clipSeconds = u32(29)
         let mode = b[57]
         if mode != snapshot.captureMode {
+            let old = snapshot.captureMode
             snapshot.captureMode = mode
+            evAnchorOffset = nil   // 滑动窗口随模式切换漂移：EV 锚定失效，待重新写入锚定
+            onLog?("[diag] EV 锚定重置 captureMode \(old.map { "0x\(String($0, radix: 16))" } ?? "nil") → 0x\(String(mode, radix: 16))")
             onChanged?(snapshot)
             onCaptureModeChanged?(mode)
         }
@@ -433,6 +441,14 @@ public final class OSMOStatusTracker {
         if p.count >= 32, u32(28) > 0 { snapshot.internalFreeMB = u32(28) }
     }
 
+    /// cam_video_param_v2：分辨率码 @0、帧率码 @1 u8（OA4 实测 2026-11-11，6 次分辨率 +
+    /// 2 次帧率变化与操作逐一对应；替代 02/19 轮询）
+    private func parseVideoParamV2(_ d: [UInt8]) {
+        guard d.count >= 2 else { return }
+        snapshot.videoResolutionCode = d[0]
+        snapshot.videoFpsCode = d[1]
+    }
+
     // MARK: 00/76 固件动作事件（JSON：拍照/录制/延时动作结果，三方无记录）
     // 载荷形如 [长度头][00][{...}]：从首个 '{' 起 JSON 解析（实测 4 种 event_id 均可提取）
 
@@ -463,12 +479,8 @@ public final class OSMOStatusTracker {
         if firstReceipts.insert(name).inserted {
             onLog?("首见推送 \(name)（\(data.count)B）")
         }
-        // 临时诊断：cam_expo_param / cam_lapse_param 在 20 主题会话中零推送（其余 18 正常），
-        // 逐帧记录以定位是「相机未推」还是「解析丢弃」
-        if name == "cam_expo_param" || name == "cam_lapse_param" {
-            onLog?("[diag] \(name) 推送 \(data.count)B: \(data.map { String(format: "%02x", $0) }.joined().prefix(40))")
-        }
         switch name {
+        case "cam_video_param_v2": parseVideoParamV2(data)
         case "cam_expo_param": parseExpoParam(data)
         case "cam_image_effect": parseImageEffect(data)
         case "cam_lapse_param": parseLapseParam(data)
@@ -493,14 +505,12 @@ public final class OSMOStatusTracker {
              "temp_curve", "camcap_common":
             // 语义未实锤的主题：原始数据段记录（值变化才更新），诊断面板展示供抓包 diff
             recordRawTopic(name, data)
-        case "cam_audio_status_v2", "cam_imu_calib_info", "cam_video_param_v2", "cam_storage",
+        case "cam_audio_status_v2", "cam_imu_calib_info", "cam_storage",
              "cam_status", "cam_custom_mode_params", "cam_magnifier_status",
              "v_quality_enhance_status", "audio_timecode_status", "timecode_info":
             // 语义已明确的录制态/校准类主题（音频电平表、录制时码、容量更新等），
             // 不进未知信号区；具体字段布局待后续抓包 diff，需要时在此接入专有解析
             break
-            // 布局未实锤：原始数据段记录（值变化才更新），诊断面板展示供抓包 diff
-            recordRawTopic(name, data)
         default:
             if !loggedUnknownTopics.contains(name) {
                 loggedUnknownTopics.insert(name)
@@ -518,12 +528,38 @@ public final class OSMOStatusTracker {
     }
 
     /// cam_expo_param：ISO u32 @16、快门 u16 @20、EV 补偿 @6、测光 @15（osmocam §8.3）
+    /// cam_expo_param：测光 @15、生效 ISO u32 @16、生效快门 u16 @20；EV 经头部窗口锚定回读
     private func parseExpoParam(_ d: [UInt8]) {
         guard d.count >= 22 else { return }
         snapshot.effectiveISO = UInt32(d[16]) | UInt32(d[17]) << 8 | UInt32(d[18]) << 16 | UInt32(d[19]) << 24
         snapshot.effectiveShutter = UInt16(d[20]) | UInt16(d[21]) << 8
-        snapshot.expoCompValue = d[6]
         snapshot.lightMeterValue = d[15]
+        // EV：41B 数据段是内部参数流的滑动窗口（头部偏移随模式切换漂移 ±2B），固定偏移 @6 不可靠，
+        // 且尾段 @15-21 与 EV 同编码域（0x07-0x19）不能参与扫描。两段式：
+        // ① 锚定——setEV 登记的码在头部 0..<15 唯一出现时锁定其位置（撞车保留登记，等窗口变化再试）；
+        // ② 回读——同模式内直接读锚定偏移并校验 EV 码域，相机端改动由此同步；
+        // 模式切换重置偏移、读数出格视为失锁，均待下次写入重新锚定（宁缺勿错）
+        if let code = lastSetEVCode {
+            let head = d.prefix(15)
+            let matches = head.indices.filter { head[$0] == code }
+            if matches.count == 1, let off = matches.first {
+                evAnchorOffset = off
+                snapshot.expoCompValue = code
+                lastSetEVCode = nil
+                onLog?("[diag] EV 锚定 偏移=\(off) 码=0x\(String(code, radix: 16))")
+            }
+        } else if let off = evAnchorOffset, off < d.count {
+            let v = d[off]
+            if (0x07...0x19).contains(v) {
+                if snapshot.expoCompValue != v {
+                    onLog?("[diag] EV 回读 偏移=\(off) 0x\(String(snapshot.expoCompValue ?? 0, radix: 16)) → 0x\(String(v, radix: 16))")
+                }
+                snapshot.expoCompValue = v
+            } else {
+                evAnchorOffset = nil
+                onLog?("[diag] EV 失锁 偏移=\(off) 读数=0x\(String(v, radix: 16)) 出格")
+            }
+        }
     }
 
     /// cam_image_effect：色彩档位 @2、降噪 s8 @14、锐度 s8 @15（osmocam §8.3）
@@ -547,6 +583,8 @@ public final class OSMOStatusTracker {
 
     /// 02/19 → `00 <res> <fps> 00 00 <factor>`（osmocam §7.2）
     private func parseVideoFormatReply(_ p: Data) {
+        // 02/19 轮询已退役（cam_video_param_v2 推送驱动，0x0100 归因说明见 unknown-signals-report）；
+        // 保留解析以兼容旧固件路径
         let result = p.first ?? 0xE0
         setQueryError("video_format", result)
         guard result == 0x00, p.count >= 3 else { return }
@@ -560,7 +598,13 @@ public final class OSMOStatusTracker {
         let result = p.first ?? 0xE0
         setQueryError("exposure_mode", result)
         guard result == 0x00, p.count >= 2 else { return }
-        snapshot.exposureMode = [UInt8](p)[1]
+        let newMode = [UInt8](p)[1]
+        // 同值应答不重置（02/1F 可能以推送形式到达）：仅真实切换时锚定失效
+        if newMode != snapshot.exposureMode {
+            evAnchorOffset = nil
+            onLog?("[diag] EV 锚定重置 exposureMode → 0x\(String(newMode, radix: 16))")
+        }
+        snapshot.exposureMode = newMode
     }
 
     /// 02/2B → `00 <code>`（osmocam §7.1）
