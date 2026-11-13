@@ -61,5 +61,7 @@ echo "==> $IFACE 就绪"
 OUT="$DIR/tcp-capture-$(date +%Y%m%d-%H%M%S).pcap"
 echo "==> 抓包输出: $OUT（Ctrl+C 停止）"
 trap 'echo; echo "==> 抓包已停止。"' INT
-sudo tcpdump -i "$IFACE" -s 256 -U -w "$OUT" 'net 192.168.2.0/24' || true
+# -s 0 全包捕获：曾用 -s 256 截断主题推送帧（00/99 名字+数据段超 256B 被切），
+# 6 个历史抓包因此丢失全部 cam_expo_param 等主题数据（2026-11-13 教训）
+sudo tcpdump -i "$IFACE" -s 0 -U -w "$OUT" 'net 192.168.2.0/24' || true
 echo "==> 完成。产物: $OUT（大小: $(du -h "$OUT" | cut -f1)）"

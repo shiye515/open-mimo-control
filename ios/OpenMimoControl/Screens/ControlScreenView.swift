@@ -766,9 +766,9 @@ struct ControlScreenView: View {
                 pickExposureMode(auto: i == 0)
             }
             evPill
-            pillWheelRow("快门", current: manual ? st.shutterName : (st.effectiveShutterName ?? st.shutterName),
+            pillWheelRow("快门", current: st.effectiveShutterName ?? st.shutterName,
                          options: activeShutterRaws.map { OSMOA4.shutterText(raw: $0) },
-                         initialIndex: st.shutterRaw.flatMap { activeShutterRaws.firstIndex(of: $0) },
+                         initialIndex: st.effectiveShutter.flatMap { activeShutterRaws.firstIndex(of: $0) },
                          disabled: !manual,
                          onPick: { pickShutter($0) },
                          onClose: { flow.refreshOSMOQueries() })
@@ -1263,7 +1263,12 @@ struct ControlScreenView: View {
             ("EV 补偿", st.expoCompName ?? "—"),
             ("测光", st.lightMeterName ?? "—"),
             ("生效 ISO", st.effectiveISO.map { $0 == 0 ? "自动" : String($0) } ?? "—"),
+            ("ISO 档码", st.isoStepCode.map { String(format: "0x%02X", $0) } ?? "—"),
             ("生效快门", st.effectiveShutterName ?? "—"),
+            ("拍照快门", st.photoShutterName ?? "—"),
+            ("数字增益", st.digitalGain.map {
+                "\($0)." + (st.digitalGainFine.map(String.init) ?? "?")
+            } ?? "—"),
             ("白平衡", st.wbName ?? "—"),
             ("色彩档位", st.colorProfileName ?? "—"),
             ("锐度", st.sharpness.map(String.init) ?? "—"),

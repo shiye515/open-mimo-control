@@ -677,15 +677,15 @@ public final class OSMOCameraLink {
 
     /// 当前拍摄模式下的参数查询（一次一条，间隔 0.3s——osmocam §5.9：单发等应答）。
     /// 触发点：连接落定 / 拍摄模式切换 / 3s 参数轮询 / 设置成功后 0.5s 校准。
-    /// 回读走 statusTracker（02/1F/2B/29/2D/13/8E 应答解析）；视频格式已由
-    /// cam_video_param_v2 推送驱动，不再轮询。UI 以回读为准。
+    /// 推送驱动裁剪（cam-expo-param.md）：视频格式（cam_video_param_v2）、曝光模式与
+    /// 生效 ISO/快门全精度含小数（cam_expo_param @7/@16-17/@20-22）均已由订阅推送覆盖——
+    /// 02/1F、02/29 退役；02/2B 仅手动模式轮询（滚轮定位需档位码，自动模式下恒回 00 无信息量）。
+    /// 回读走 statusTracker（02/2B/2D/13/8E 应答解析）。UI 以回读为准。
     private func sendStatusQueries() {
         // 按模式裁剪查询：无效查询（如照片模式读视频格式）会被相机 DF 拒绝，直接不发
         let mode = statusTracker.snapshot.captureMode
         let manual = statusTracker.snapshot.exposureMode == 0x04
         var queries: [(UInt8, UInt8, Data)] = [
-            (0x02, 0x1F, Data()),   // 曝光模式
-            (0x02, 0x2B, Data()),   // ISO
             (0x02, 0x2D, Data()),   // 白平衡
             (0x02, 0x8E, OSMOA4.parameterGetPayload(type: OSMOA4.paramFOV)),
             (0x02, 0x8E, OSMOA4.parameterGetPayload(type: OSMOA4.paramEIS)),
@@ -702,7 +702,7 @@ public final class OSMOCameraLink {
             queries.insert((0x02, 0x13, Data()), at: 0)   // 照片格式（仅照片模式；视频格式由 cam_video_param_v2 推送驱动）
         }
         if manual {
-            queries.append((0x02, 0x29, Data()))          // 快门（仅手动曝光可读）
+            queries.append((0x02, 0x2B, Data()))          // ISO 档位码（手动曝光需滚轮定位；自动下恒回 00）
         }
         for (i, q) in queries.enumerated() {
             queue.asyncAfter(deadline: .now() + Double(i) * 0.3) { [weak self] in
@@ -919,18 +919,12 @@ public final class OSMOCameraLink {
     }
 
     /// DUML 帧 → 状态跟踪器；快照变化节流 0.5s 发一次 onStatus。
-    /// handle 在 datalink 队列执行：tracker 状态与 noteEVWrite / noteParameterRequest 等
-    /// 登记路径天然串行（NW 接收回调线程、调用方线程都不再触碰 tracker）
+    /// handle 在 datalink 队列执行：tracker 状态与 noteParameterRequest 等登记路径
+    /// 天然串行（NW 接收回调线程、调用方线程都不再触碰 tracker）
     private func feedStatus(cmdSet: UInt8, cmdId: UInt8, sender: UInt8, payload: Data) {
         queue.async { [weak self] in
             self?.statusTracker.handle(cmdSet: cmdSet, cmdId: cmdId, sender: sender, payload: payload)
         }
-    }
-
-    /// 链路队列登记最近写入的 EV 码（setEV 从调用方线程调用，跳转后与解析串行；
-    /// cam_expo_param 滑动窗口解析锚点）
-    func noteEVWrite(_ code: UInt8) {
-        queue.async { [weak self] in self?.statusTracker.lastSetEVCode = code }
     }
 
     private func answerRequest(cmdSet: UInt8, cmdId: UInt8, sender: UInt8) {

@@ -94,32 +94,33 @@ final class OSMOStatusParsingTests: XCTestCase {
     }
 
     func testExpoParamTopic() {
-        var d = [UInt8](repeating: 0, count: 24)
-        d[6] = 0x13                       // EV 码 0x13（滑动窗口策略下需写入登记后回读）
+        var d = [UInt8](repeating: 0, count: 41)
+        d[6] = 0x13                       // EV 码 0x13（视频模式直读）
+        d[7] = 0x01                       // 曝光模式 = 自动
+        d[11] = 0x07                      // ISO 档码 = 0x07（1600 档，自动曝光）
         d[15] = 0x07                      // 测光 = -1 EV（07=-3EV…16=0…19=+3EV）
-        d.replaceSubrange(16...19, with: le32(3200))           // 生效 ISO 3200
+        d.replaceSubrange(16...17, with: le16(3200))           // 生效 ISO 3200（u16 模拟增益分量）
         d.replaceSubrange(20...21, with: le16(0x8019))         // 生效快门 1/25s
+        d.replaceSubrange(33...34, with: le16(354))            // 数字增益 354
+        d[35] = 9                         // 数字增益十分位 → 354.9
 
         let t = OSMOStatusTracker()
 
-        // 未登记写入意图：EV 不更新（宁缺勿错——固定偏移 @6 在滑动窗口下不可靠）
-        t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
-                 payload: topicFrame(name: "cam_expo_param", data: d))
-        XCTAssertNil(t.snapshot.expoCompValue)
-        XCTAssertEqual(t.snapshot.lightMeterName, "-3.0 EV")
-        XCTAssertEqual(t.snapshot.effectiveISO, 3_200)
-        XCTAssertEqual(t.snapshot.effectiveShutter, 0x8019)
-        XCTAssertEqual(t.snapshot.effectiveShutterName, "1/25 s")
-
-        // 锚定：登记码在头部唯一出现 → 锁定位置并消费登记
-        t.lastSetEVCode = 0x13
+        // 连接即同步——无需 App 先写一次、无需模式前置（2026-11-14 固定布局实锤后直读 @6）
         t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
                  payload: topicFrame(name: "cam_expo_param", data: d))
         XCTAssertEqual(t.snapshot.expoCompValue, 0x13)
         XCTAssertEqual(t.snapshot.expoCompName, "+1.0")      // 0x13：码 16=0EV → +1.0（一位小数）
-        XCTAssertNil(t.lastSetEVCode)
+        XCTAssertEqual(t.snapshot.exposureMode, 0x01)        // @7 推送驱动 曝光模式
+        XCTAssertEqual(t.snapshot.lightMeterName, "-3.0 EV")
+        XCTAssertEqual(t.snapshot.effectiveISO, 3_200)
+        XCTAssertEqual(t.snapshot.isoStepCode, 0x07)
+        XCTAssertEqual(t.snapshot.effectiveShutter, 0x8019)    // @22=0 无小数
+        XCTAssertEqual(t.snapshot.effectiveShutterName, "1/25 s")
+        XCTAssertEqual(t.snapshot.digitalGain, 354)
+        XCTAssertEqual(t.snapshot.digitalGainFine, 9)
 
-        // 相机端改动同步：无登记时，锚定偏移处的字节变化 → EV 跟随
+        // 相机端改动同步：@6 变化 → EV 直接跟随（全模式）
         var d2 = d
         d2[6] = 0x0A                       // 相机端把 EV 从 +1.0 改到 -2.0
         t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
@@ -127,60 +128,102 @@ final class OSMOStatusParsingTests: XCTestCase {
         XCTAssertEqual(t.snapshot.expoCompValue, 0x0A)
         XCTAssertEqual(t.snapshot.expoCompName, "-2.0")
 
-        // 撞车：登记码在头部出现 ≥2 → 保留登记，不锁定不更新
+        // 码域出格兜底：@6 不在 0x07-0x19 → 不更新
         var d3 = d
-        d3[3] = 0x13
-        t.lastSetEVCode = 0x13
+        d3[6] = 0x20
         t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
                  payload: topicFrame(name: "cam_expo_param", data: d3))
         XCTAssertEqual(t.snapshot.expoCompValue, 0x0A)
-        XCTAssertEqual(t.lastSetEVCode, 0x13)
 
-        // 读数出格：锚定偏移处字节不在 EV 码域（0x07-0x19）→ 失锁，后续推送不再改写
-        t.lastSetEVCode = nil
+        // 各模式独立 EV 记忆：切模式时 @6 跳到该模式记忆值 → 显示跟随（正确行为）
         var d4 = d
-        d4[6] = 0x20
+        d4[6] = 0x10                       // 切到照片模式，该模式 EV 记忆为 0.0（码 16）
         t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
                  payload: topicFrame(name: "cam_expo_param", data: d4))
-        XCTAssertEqual(t.snapshot.expoCompValue, 0x0A)
+        XCTAssertEqual(t.snapshot.expoCompValue, 0x10)
+        XCTAssertEqual(t.snapshot.expoCompName, "+0.0")
+
+        // 切回视频：@6 恢复视频 EV → 立即跟随
         var d5 = d
         d5[6] = 0x19
         t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
                  payload: topicFrame(name: "cam_expo_param", data: d5))
-        XCTAssertEqual(t.snapshot.expoCompValue, 0x0A)
+        XCTAssertEqual(t.snapshot.expoCompValue, 0x19)
+        XCTAssertEqual(t.snapshot.expoCompName, "+3.0")
+    }
 
-        // 尾段同码不干扰：锚点码与测光字节 @15 相同仍可锁定（头部扫描不含 @15+）
-        var d6 = d
-        d6[6] = 0x07                       // EV 码 0x07 = -3.0，与 d[15] 测光字节相同
-        t.lastSetEVCode = 0x07
+    /// @22 = 快门小数字节（双粒度 ≤9 十分位/≥10 百分位，与 02/29、shutterRaw 同构）
+    func testExpoParamShutterDecimal() {
+        var d = [UInt8](repeating: 0, count: 41)
+        d[6] = 0x13
+        d[7] = 0x04                      // 手动曝光
+        d.replaceSubrange(20...21, with: le16(0x0001))         // u16 = 1s
+        let t = OSMOStatusTracker()
         t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
-                 payload: topicFrame(name: "cam_expo_param", data: d6))
-        XCTAssertEqual(t.snapshot.expoCompValue, 0x07)
+                 payload: topicFrame(name: "cam_expo_param", data: d))
+        XCTAssertEqual(t.snapshot.effectiveShutter, 0x0001)    // 无小数 → 1s
+        XCTAssertEqual(t.snapshot.effectiveShutterName, "1 s")
 
-        // 模式切换重置锚定：偏移失效后改值不再跟随，待重新写入锚定
-        var cs = [UInt8](repeating: 0, count: 58)
-        cs[57] = 0x01                      // 拍摄模式 → 视频（与当前 nil 不同，触发重置）
-        t.handle(cmdSet: 0x02, cmdId: 0x80, sender: 0x01, payload: Data(cs))
-        var d7 = d
-        d7[6] = 0x19
+        d[22] = 0x03                                           // 十分位 0.3 → 1.3s
         t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
-                 payload: topicFrame(name: "cam_expo_param", data: d7))
-        XCTAssertEqual(t.snapshot.expoCompValue, 0x07)
+                 payload: topicFrame(name: "cam_expo_param", data: d))
+        XCTAssertEqual(t.snapshot.effectiveShutter, 0x3_0001)
+        XCTAssertEqual(t.snapshot.effectiveShutterName, "1.3 s")
 
-        // 同值曝光模式应答不重置锚定（02/1F 可能以推送/重查应答形式重复到达）
-        t.handle(cmdSet: 0x02, cmdId: 0x1F, sender: 0x01, payload: Data([0x00, 0x04]))
-        var d8 = d
-        d8[6] = 0x0A
-        t.lastSetEVCode = 0x0A
+        d[22] = 0x43                                           // 百分位 0.67（分母形 0x8001）→ 1/1.67s
+        d[20] = 0x01
+        d[21] = 0x80
         t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
-                 payload: topicFrame(name: "cam_expo_param", data: d8))
-        XCTAssertEqual(t.snapshot.expoCompValue, 0x0A)     // 重新锚定
-        t.handle(cmdSet: 0x02, cmdId: 0x1F, sender: 0x01, payload: Data([0x00, 0x04]))
-        var d9 = d
-        d9[6] = 0x19
+                 payload: topicFrame(name: "cam_expo_param", data: d))
+        XCTAssertEqual(t.snapshot.effectiveShutter, 0x43_8001)
+        XCTAssertEqual(t.snapshot.effectiveShutterName, "1/1.67 s")
+    }
+
+    /// 真实抓包帧锁定（2026-11-14 App 会话首帧）：41B 固定布局逐域对账——
+    /// 恒定域（@0-5/@7-10/@12-14/@18-19/@22-27/@29-31/@37-39）偏移写错会静默错位
+    func testExpoParamRealFrameLayout() {
+        let hex = "0000328000001901010000070318010f40060000198000000000000064000000016201096400000001"
+        let d = hexToBytes(hex)
+        XCTAssertEqual(d.count, 41)
+        XCTAssertEqual(Int(d[2]) | Int(d[3]) << 8, 0x8032)                 // 拍照快门 1/50（拍照子系统 AE，随场景变化）
+        XCTAssertEqual(d[6], 0x19)                                         // EV +3.0
+        XCTAssertEqual(d[7], 0x01)                                         // 曝光模式：自动
+        XCTAssertEqual(d[8], 0x01)
+        XCTAssertEqual(Array(d[9...10]), [0, 0])
+        XCTAssertEqual(d[11], 0x07)                                        // ISO 档码 1600 档（该帧 ISO=1600）
+        XCTAssertEqual(d[12], 0x03)
+        XCTAssertEqual(d[13], 0x18)
+        XCTAssertEqual(d[14], 0x01)
+        XCTAssertEqual(d[15], 0x0f)                                        // 测光 +1.0
+        XCTAssertEqual(Int(d[16]) | Int(d[17]) << 8, 1600)                           // ISO（ISO MAX 钳制值）
+        XCTAssertEqual(Array(d[18...19]), [0, 0])
+        XCTAssertEqual(Int(d[20]) | Int(d[21]) << 8, 0x8019)                         // 快门 1/25
+        XCTAssertEqual(Array(d[22...27]), [UInt8](repeating: 0, count: 6))
+        XCTAssertEqual(d[28], 100)                                         // 恒 100（候选电池%）
+        XCTAssertEqual(Array(d[29...31]), [0, 0, 0])
+        XCTAssertEqual(d[32], 0x01)
+        XCTAssertEqual(Int(d[33]) | Int(d[34]) << 8, 354)                  // 数字增益
+        XCTAssertEqual(d[35], 9)                                           // 十分位 → 354.9
+        XCTAssertEqual(d[36], 100)                                         // 恒 100
+        XCTAssertEqual(Array(d[37...39]), [0, 0, 0])
+        XCTAssertEqual(d[40], 0x01)
+
+        let t = OSMOStatusTracker()
         t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
-                 payload: topicFrame(name: "cam_expo_param", data: d9))
-        XCTAssertEqual(t.snapshot.expoCompValue, 0x19)     // 同值应答未杀锚定，回读仍跟随
+                 payload: topicFrame(name: "cam_expo_param", data: d))
+        XCTAssertEqual(t.snapshot.expoCompValue, 0x19)
+        XCTAssertEqual(t.snapshot.effectiveISO, 1600)
+        XCTAssertEqual(t.snapshot.exposureMode, 0x01)      // @7 = 01 自动
+        XCTAssertEqual(t.snapshot.isoStepCode, 0x07)
+        XCTAssertEqual(t.snapshot.effectiveShutterName, "1/25 s")
+        XCTAssertEqual(t.snapshot.photoShutterName, "1/50 s")
+        XCTAssertEqual(t.snapshot.digitalGain, 354)
+    }
+
+    private func hexToBytes(_ s: String) -> [UInt8] {
+        Array(stride(from: 0, to: s.count, by: 2).map {
+            UInt8(s[s.index(s.startIndex, offsetBy: $0)..<s.index(s.startIndex, offsetBy: $0 + 2)], radix: 16)!
+        })
     }
 
     func testVideoParamV2Topic() {

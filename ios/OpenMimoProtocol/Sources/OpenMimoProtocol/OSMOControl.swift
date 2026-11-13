@@ -361,10 +361,9 @@ public extension OSMOCameraLink {
     func setShutter(raw: UInt32) async throws {
         _ = try await request(cmdSet: 0x02, cmdId: 0x28, payload: OSMOA4.shutterPayload(raw: raw))
     }
-    /// EV 补偿（码 16 = 0EV，范围 07h-19h 三分之一档；仅自动曝光）
+    /// EV 补偿（码 16 = 0EV，范围 07h-19h 三分之一档；仅自动曝光）。
+    /// 写入生效后 @6 由 cam_expo_param 推送直读回显（视频模式，无需登记）
     func setEV(_ value: UInt8) async throws {
-        // 经链路队列登记（与解析串行）：cam_expo_param 是滑动窗口，推送据此扫描唯一出现的 EV 码
-        noteEVWrite(value)
         _ = try await request(cmdSet: 0x02, cmdId: 0x2E, payload: Data([value]))
     }
 
