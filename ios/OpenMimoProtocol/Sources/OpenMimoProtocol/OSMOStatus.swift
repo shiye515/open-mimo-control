@@ -1,15 +1,24 @@
 import Foundation
 
+// MARK: - LE 解码助手（推送/应答固定小端布局；b 为字节组，i 为起始偏移）
+
+private func le16(_ b: [UInt8], _ i: Int) -> UInt16 { UInt16(b[i]) | UInt16(b[i+1]) << 8 }
+
+private func le32(_ b: [UInt8], _ i: Int) -> UInt32 {
+    UInt32(b[i]) | UInt32(b[i+1]) << 8 | UInt32(b[i+2]) << 16 | UInt32(b[i+3]) << 24
+}
+
 /// OSMO 相机状态快照——datalink 上全部可获取状态的汇总（osmocam PROTOCOL.md §6/§7/§8）。
 ///
 /// 数据来源：
 /// - `02/80` 推送 ~10/s：录制态/工作态/存储总量剩余/剩余张数秒数/已录秒数/拍摄模式
 /// - `0D/02` 推送 ~1/s：电池电压/电流/温度/电量百分比
 /// - `02/DC` 推送（变化时）：microSD 与内置存储 总量/剩余 MB
-/// - `00/99` 命名主题推送：cam_expo_param（ISO/快门/EV 补偿/测光）、
-///   cam_image_effect（色彩档位/锐度/降噪）、cam_lapse_param（延时间隔等）
-/// - 查询应答（首字节 00=OK）：`02/19` 视频格式、`02/1F` 曝光模式、`02/2B` ISO、
-///   `02/29` 快门、`02/2D` 白平衡
+/// - `00/99` 命名主题推送：cam_expo_param（ISO/快门/EV 补偿/测光）、cam_video_param_v2
+///   （分辨率/帧率）、cam_image_effect（色彩档位/锐度/降噪）、cam_lapse_param（延时间隔等）、
+///   cam_record_time（录制秒）、cam_lens_state（变焦倍率）等 20 主题（topics-catalog.md）
+/// - 查询应答（首字节 00=OK）：`02/1F` 曝光模式、`02/2B` ISO、`02/29` 快门、
+///   `02/2D` 白平衡、`02/13` 照片格式、`02/8E` 参数 TLV（02/19 已退役仅兼容）
 public struct OSMOStatusSnapshot: Equatable {
 
     // MARK: 02/80 相机状态推送
@@ -78,7 +87,8 @@ public struct OSMOStatusSnapshot: Equatable {
     public var isoMaxCode: UInt8?
     /// 弱光增稳（02/8E pid 0x0030 回读：01 开 / 00 关）
     public var lowLightCode: UInt8?
-    /// 画面旋转象限（02/8E pid 0x0014 回读：0/1/2/3 = 逆时针 90° 象限数）
+    /// 画面旋转（02/8E pid 0x0014 回读：0 上 / 1 左横置 / 2 下 / 3 右横置，
+    /// 2026-11-11 四向实测修正；见 OSMOA4.paramOrientation）
     public var orientationCode: UInt8?
     /// Pro 模式（02/8E pid 0x0000 回读：01 开 / 00 关；连接即查，控制专业参数显隐）
     public var proOnCode: UInt8?
@@ -97,7 +107,7 @@ public struct OSMOStatusSnapshot: Equatable {
 
     // MARK: 00/99 命名主题推送
 
-    /// EV 补偿原始值（10 + 三分之一档；见 expoCompName）
+    /// EV 补偿原始码（码 16 = 0EV，范围 07h-19h；经 cam_expo_param 锚定回读，见 expoCompName）
     public var expoCompValue: UInt8?
     /// 相机测光（同一编码，指示画面偏离正确曝光的程度）
     public var lightMeterValue: UInt8?
@@ -207,42 +217,19 @@ extension OSMOStatusSnapshot {
         }
     }
 
-    /// 快门原始值 → "1/25 s" / "1.3 s" / "2 s"（osmocam §7.1：bit15=1 → 1/x 秒，否则整秒 + 十分位）
+    /// 快门原始值 → "1/25 s" / "1.3 s" / "2 s"（格式化统一走 OSMOA4.shutterText）
     public var shutterName: String? {
-        guard let raw = shutterRaw else { return nil }
-        let u16 = UInt16(truncatingIfNeeded: raw)
-        let decimal = Int((raw >> 16) & 0xFF)
-        return Self.formatShutter(u16: u16, decimal: decimal)
+        shutterRaw.map { OSMOA4.shutterText(raw: $0) }
     }
 
     /// cam_expo_param 实际生效快门（同编码但无十分位）
     public var effectiveShutterName: String? {
-        guard let u16 = effectiveShutter else { return nil }
-        return Self.formatShutter(u16: u16, decimal: 0)
+        effectiveShutter.map { OSMOA4.shutterText(raw: UInt32($0)) }
     }
 
     /// cam_expo_param 实际生效 ISO（自动曝光下相机自计算值）
     public var effectiveISOName: String? {
         effectiveISO.map { "\($0)" }
-    }
-
-    private static func formatShutter(u16: UInt16, decimal: Int) -> String {
-        // 小数字节双粒度（2026-11-10 抓包实锤）：≤9 十分位（0x800C+5=1/12.5s、0x0001+3=1.3s），
-        // ≥10 百分位（0x8001+0x43=1/1.67s、0x8001+0x19=1/1.25s）；<1s 显示为 1/x
-        let digit = OSMOA4.shutterFraction(UInt32(decimal))
-        if u16 & 0x8000 != 0 {
-            let x = Double(u16 & 0x7FFF) + digit
-            let txt = x == x.rounded() ? String(Int(x)) : OSMOA4.shutterDenominatorText(x)
-            return "1/\(txt) s"
-        }
-        let s = Double(u16) + digit
-        if s > 0, s < 1 {
-            let inv = 1 / s
-            let txt = inv == inv.rounded() ? String(Int(inv)) : OSMOA4.shutterDenominatorText(inv)
-            return "1/\(txt) s"
-        }
-        let txt = decimal == 0 ? String(Int(s)) : String(format: "%.1f", s)
-        return "\(txt) s"
     }
 
     /// 曝光模式（osmocam §7.1）
@@ -387,19 +374,16 @@ public final class OSMOStatusTracker {
     private func parseCameraStatus(_ p: Data) {
         guard p.count >= 58 else { return }
         let b = [UInt8](p)
-        func u32(_ i: Int) -> Int64 {
-            Int64(b[i]) | Int64(b[i+1]) << 8 | Int64(b[i+2]) << 16 | Int64(b[i+3]) << 24
-        }
         snapshot.recordState = Int(b[0] >> 6)
         snapshot.isWritingFile = b[2] & 0x08 != 0
         snapshot.mediaMode = b[3] & 0x40 != 0
         snapshot.workMode = Int(b[4])
         // 回放时 5-20 读 0：保留上次非零值
-        if u32(5) > 0 { snapshot.totalStorageMB = u32(5) }
-        if u32(9) > 0 { snapshot.freeStorageMB = u32(9) }
-        if u32(13) > 0 { snapshot.photosLeft = u32(13) }
-        if u32(17) > 0 { snapshot.videoSecondsLeft = u32(17) }
-        snapshot.clipSeconds = u32(29)
+        if le32(b, 5) > 0 { snapshot.totalStorageMB = Int64(le32(b, 5)) }
+        if le32(b, 9) > 0 { snapshot.freeStorageMB = Int64(le32(b, 9)) }
+        if le32(b, 13) > 0 { snapshot.photosLeft = Int64(le32(b, 13)) }
+        if le32(b, 17) > 0 { snapshot.videoSecondsLeft = Int64(le32(b, 17)) }
+        snapshot.clipSeconds = Int64(le32(b, 29))
         let mode = b[57]
         if mode != snapshot.captureMode {
             let old = snapshot.captureMode
@@ -416,13 +400,9 @@ public final class OSMOStatusTracker {
     private func parseBattery(_ p: Data) {
         guard p.count >= 21 else { return }
         let b = [UInt8](p)
-        func s32(_ i: Int) -> Int {
-            Int(Int32(bitPattern:
-                UInt32(b[i]) | UInt32(b[i+1]) << 8 | UInt32(b[i+2]) << 16 | UInt32(b[i+3]) << 24))
-        }
-        snapshot.batteryVoltageMV = s32(1)
-        snapshot.batteryCurrentMA = s32(5)
-        snapshot.batteryTempDeciC = Int(b[17]) | Int(b[18]) << 8
+        snapshot.batteryVoltageMV = Int(Int32(bitPattern: le32(b, 1)))
+        snapshot.batteryCurrentMA = Int(Int32(bitPattern: le32(b, 5)))
+        snapshot.batteryTempDeciC = Int(le16(b, 17))
         snapshot.batteryPercent = Int(b[20])
     }
 
@@ -431,14 +411,11 @@ public final class OSMOStatusTracker {
     private func parseStorage(_ p: Data) {
         guard p.count >= 32 else { return }
         let b = [UInt8](p)
-        func u32(_ i: Int) -> Int64 {
-            Int64(b[i]) | Int64(b[i+1]) << 8 | Int64(b[i+2]) << 16 | Int64(b[i+3]) << 24
-        }
         // 回放时 microSD 字段可能读 0：保留上次非零值
-        if u32(6) > 0 { snapshot.sdTotalMB = u32(6) }
-        if u32(10) > 0 { snapshot.sdFreeMB = u32(10) }
-        if p.count >= 32, u32(24) > 0 { snapshot.internalTotalMB = u32(24) }
-        if p.count >= 32, u32(28) > 0 { snapshot.internalFreeMB = u32(28) }
+        if le32(b, 6) > 0 { snapshot.sdTotalMB = Int64(le32(b, 6)) }
+        if le32(b, 10) > 0 { snapshot.sdFreeMB = Int64(le32(b, 10)) }
+        if le32(b, 24) > 0 { snapshot.internalTotalMB = Int64(le32(b, 24)) }
+        if le32(b, 28) > 0 { snapshot.internalFreeMB = Int64(le32(b, 28)) }
     }
 
     /// cam_video_param_v2：分辨率码 @0、帧率码 @1 u8（OA4 实测 2026-11-11，6 次分辨率 +
@@ -485,12 +462,16 @@ public final class OSMOStatusTracker {
         case "cam_image_effect": parseImageEffect(data)
         case "cam_lapse_param": parseLapseParam(data)
         case "cam_portrait_mode":
-            onLog?("cam_portrait_mode 推送 \(data.count)B: \(data.map { String(format: "%02x", $0) }.joined().prefix(24))")
-            if !data.isEmpty { snapshot.portraitMode = data[0] != 0 }
+            // 值变化才记日志（推送周期性到达，恒定内容会刷屏）
+            let on = !data.isEmpty && data[0] != 0
+            if on != snapshot.portraitMode {
+                onLog?("cam_portrait_mode → \(on ? "竖拍" : "横拍")")
+            }
+            if !data.isEmpty { snapshot.portraitMode = on }
         case "cam_lens_state":
             // lens position u16 @14 ÷ 126 = 变焦倍率（osmo-client zoom_from_lens_state；OA4 单位 126）
             if data.count >= 16 {
-                let lens = Int(data[14]) | (Int(data[15]) << 8)
+                let lens = Int(le16(data, 14))
                 if lens >= 63, lens <= 1008 {
                     snapshot.zoomFactor = (Double(lens) / 126.0 * 10).rounded() / 10
                 }
@@ -498,8 +479,7 @@ public final class OSMOStatusTracker {
         case "cam_record_time":
             // u32 秒 @0（2026-11-08 抓包实锤：录制中逐秒递增，39 次变化与启停对齐）
             if data.count >= 4 {
-                snapshot.recordSeconds = UInt32(data[0]) | UInt32(data[1]) << 8
-                    | UInt32(data[2]) << 16 | UInt32(data[3]) << 24
+                snapshot.recordSeconds = le32(data, 0)
             }
         case "cam_fov", "shutter_param", "cam_photo_param", "cam_photo_param_new",
              "temp_curve", "camcap_common":
@@ -527,12 +507,12 @@ public final class OSMOStatusTracker {
         onChanged?(snapshot)
     }
 
-    /// cam_expo_param：ISO u32 @16、快门 u16 @20、EV 补偿 @6、测光 @15（osmocam §8.3）
     /// cam_expo_param：测光 @15、生效 ISO u32 @16、生效快门 u16 @20；EV 经头部窗口锚定回读
+    /// （机制与真机验证记录见 control-channel「EV 补偿」）
     private func parseExpoParam(_ d: [UInt8]) {
         guard d.count >= 22 else { return }
-        snapshot.effectiveISO = UInt32(d[16]) | UInt32(d[17]) << 8 | UInt32(d[18]) << 16 | UInt32(d[19]) << 24
-        snapshot.effectiveShutter = UInt16(d[20]) | UInt16(d[21]) << 8
+        snapshot.effectiveISO = le32(d, 16)
+        snapshot.effectiveShutter = le16(d, 20)
         snapshot.lightMeterValue = d[15]
         // EV：41B 数据段是内部参数流的滑动窗口（头部偏移随模式切换漂移 ±2B），固定偏移 @6 不可靠，
         // 且尾段 @15-21 与 EV 同编码域（0x07-0x19）不能参与扫描。两段式：
@@ -574,9 +554,9 @@ public final class OSMOStatusTracker {
     private func parseLapseParam(_ d: [UInt8]) {
         guard d.count >= 11 else { return }
         snapshot.lapseKeep = d[0]
-        snapshot.lapseIntervalDeciS = UInt16(d[1]) | UInt16(d[2]) << 8
-        snapshot.lapseDurationS = UInt32(d[5]) | UInt32(d[6]) << 8 | UInt32(d[7]) << 16 | UInt32(d[8]) << 24
-        snapshot.lapseSpeed = UInt16(d[9]) | UInt16(d[10]) << 8
+        snapshot.lapseIntervalDeciS = le16(d, 1)
+        snapshot.lapseDurationS = le32(d, 5)
+        snapshot.lapseSpeed = le16(d, 9)
     }
 
     // MARK: 查询应答（首字节 = 结果码，00=OK）
@@ -621,8 +601,7 @@ public final class OSMOStatusTracker {
         setQueryError("shutter", result)
         guard result == 0x00, p.count >= 5 else { return }
         let b = [UInt8](p)
-        let u16 = UInt16(b[2]) | UInt16(b[3]) << 8
-        snapshot.shutterRaw = UInt32(u16) | UInt32(b[4]) << 16
+        snapshot.shutterRaw = UInt32(le16(b, 2)) | UInt32(b[4]) << 16
     }
 
     /// 02/2D 白平衡读取。布局文档未给全：按 `00 <mode> <kelvin/100 u16>` 防御性解析。
@@ -632,7 +611,7 @@ public final class OSMOStatusTracker {
         guard result == 0x00, p.count >= 4 else { return }
         let b = [UInt8](p)
         snapshot.wbMode = b[1]
-        snapshot.wbKelvin = (Int(b[2]) | Int(b[3]) << 8) * 100
+        snapshot.wbKelvin = Int(le16(b, 2)) * 100
     }
 
     /// 02/13 照片格式读取 → `00 <size> <ratio>`（仅照片模式；其他模式 DF）
@@ -680,7 +659,7 @@ public final class OSMOStatusTracker {
         case OSMOA4.paramPro: snapshot.proOnCode = p[6]
         case OSMOA4.paramLowLight: snapshot.lowLightCode = p[6]
         case OSMOA4.paramOrientation:
-            // 3 字节值 [0, 象限, 0]（2026-11-10 旋转抓包实锤）；象限=逆时针 90° 计数
+            // 3 字节值 [0, 朝向, 0]（2026-11-11 四向实测：0 上 / 1 左 / 2 下 / 3 右）
             if p.count >= 8 { snapshot.orientationCode = p[7] }
         default: break
         }

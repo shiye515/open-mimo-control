@@ -3,6 +3,16 @@
 > 证据：docs/protocol/mimo-ios.pcap 19:52:35–19:55:20；帧格式与 CRC 经 DJI 官方 Osmo GPS Controller Demo
 > （docs/reference/osmo-gps-controller/，注意其许可见 PROVENANCE.md）及样例帧双重验证。帧样例见 samples/。
 
+## 目录
+
+- **1** 帧格式（DUML）　**2** TCP 7001 辅助通道　**3** UDP 9004 外层封装
+- **4** 命令语义：4.1 模式切换 · 4.2 拍录控制 · 4.3 参数读写（02/8E TLV） ·
+  4.4 保活与轮询 · 4.5 其他角色帧 · 4.6 参数 pid 总表
+- **5** 连接握手序列　**6** 未定项
+- **附** 码表与实锤明细（按接入时间追加）：变焦/FOV · 弱光增稳 · 取景网格 · 快门双粒度 ·
+  色彩 · 分辨率/帧率 · Pro · 延时值域 · EV 锚定回读 · 相机朝向 · 拍照倒计时 ·
+  订阅全集与录制时长 · 00/76 事件与 00/4A 对时
+
 ## 1. 帧格式 —— DUML（已证实，CRC 全部可校验）
 
 WiFi/TCP 通道上的业务消息为 **DUML 帧**（SOF `0x55`；注意与官方 0xAA 新版 R SDK 帧是同一命令空间的两种封装）：
@@ -77,26 +87,36 @@ mode 取值采用官方枚举（DJI Osmo GPS Controller Demo 1D02/1D04，docs/re
 
 每次命令后，`cam_status` 推送的目标模式字节在 ≤0.4s 内变为对应值（抓包内 0x01/0x02/0x05/0x0A 均有命令→推送对证）。
 
-### 4.2 拍录控制 —— cmdType 0x40, CmdSet 0x02, CmdId 0x02，payload 0=开始 / 1=停止
+### 4.2 拍录控制 —— CmdSet 0x02（真机验证）
 
-payload 语义同官方 1D03（0：开始拍录；1：停止拍录）：
+| CmdId | payload | 语义 | ACK |
+|---|---|---|---|
+| 0x02 | `01` / `00` | 录制开始 / 停止（视频类模式） | 单字节 `00` |
+| 0x01 | `01` / `00` | 拍照 / 延时摄影停止——延时摄影的启停走 0x01（0x02 在延时下答 DF） | 单字节 `00` |
 
-- **开始（已证实）**：19:53:13.143 C2S `…40 02 02 00…` → 19:53:13.158 ACK（cmdType 0xC0，seq 回显）→ 19:53:13.203 `cam_record_time` 变 1；
-- **停止（依官方语义实现，真机验证待补）**：payload `[0x01]`；抓包内多次出现 payload [0x01] 与 [0x00] 的成对帧，与"用户多次起/停"相符，但受早期时间轴精度限制未逐一锚定 → 复测时用"单次起/停"受控操作确认。
+> 更正记录：早期从 pcap 将 02/02 误读为「0=开始 / 1=停止」。自研 App 以 `1=开始 / 0=停止`
+> 真机反复验证（REC 计时与 `cam_record_time` 推送对齐）。模式分派见 `OSMOA4.recordCommand`。
 
-### 4.3 参数读写 —— CmdSet 0x02, CmdId 0x8E（结构已证实，attr 表未定）
+### 4.3 参数读写 —— CmdSet 0x02, CmdId 0x8E（TLV 结构已证实；pid 总表见 4.6）
 
-- 写：cmdType 0x40，payload `00 01 [value:2]`（成组出现于模式进入/录制按钮沿，值域 06/08/09/0f/15/18/20/28/29…）；
-- 读/批取：19:54:55.693 出现 24 连发 payload `00 00 00 00 00 00`（自增 seq，疑为重置批）；
-- S2C ACK：cmdType 0xC0 同 CmdSet/CmdId（末字节疑为结果码：e3=错误/d9/e0/df），或 cmdType 0x00、CmdId 0x6D 的详细 ACK。
+- **读（GET）**：payload `00 01 <pid u16 LE>` → 应答 `00 00 01 <pid> 01 <value>`（值在 [6]）
+- **写（SET）**：payload `01 01 <pid u16 LE> 01 <value>` → ACK 单字节 `00`
+- **负响应**：单字节结果码（DF 当前不可用 / E3 参数非法 / E0 不支持），无 pid——
+  归因依赖链路登记的最近 GET pid（`noteParameterRequest`，诊断用途）
+- pid 语义与各值码表见 4.6 及下文专节（FOV / 弱光 / Pro / ISO MAX / 朝向）
 
-### 4.4 周期性轮询（已证实，时钟般稳定）
+### 4.4 保活与轮询（OA4 实测节奏；实现 `startHeartbeatLoop` / `startSettingsPolling`）
 
-| 命令 (cmdType, CmdSet, CmdId) | 周期 | payload |
-| --- | --- | --- |
-| (0x40, 0x00, 0x51)，dst=0x48 | ~1.0s | `[04]` |
-| (0x40, 0x80, 0x00) | ~1.0s | `[82 00]` |
-| (0x40, 0xC0, 0x00) | ~4.0s | `[00 00]` |
+| 周期 | (cmdSet, cmdId) → receiver | payload | 说明 |
+|---|---|---|---|
+| 0.2s | (0x00, 0x4F) → 0x48 | `[01 00 <tick/2> 00 00 FF×4]` | 心跳主帧（tick/2 取 u8，防溢出——曾致真机 SIGTRAP） |
+| 0.2s | (0x00, 0x51) → 0x48 | `[04]` | statusPoll 保活组合，缺失时视频掉到 3 帧/min |
+| 0.2s | (0x00, 0x82) → 0x48 | 空 | 同上组合 |
+| 1s | (0x00, 0x88) → 0x28 | encoderRegister | 编码器注册续期 |
+| 2s | (0x00, 0x81 / 0x82) → 0x48 | appInfoReply / `[00]` | App 身份续期 |
+| 4s | (0x00, 0x00) → 0x28 | 空 | 通道保活 |
+| 1s | 02/8E GET pid 0x0014 | — | 朝向快轮询（预览方向跟随需要低延迟） |
+| 3s | 参数 GET 一轮 ×12 条（0.3s 间隔） | — | 相机端改动同步：曝光/ISO/白平衡/FOV/EIS/ISO MAX/Pro/弱光 + 诊断 pid 000A/0018/0020/0029；视频格式已由 cam_video_param_v2 推送驱动不轮询 |
 
 ### 4.5 其他角色帧（已证实存在，语义推定）
 
@@ -108,6 +128,22 @@ payload 语义同官方 1D03（0：开始拍录；1：停止拍录）：
 | (0x40, 0x00, 0x4F) | C2S | 连接风暴期 | 推送通道管理（`4f 01/04 …`） |
 | (0x40, 0x00, 0x99) | C2S | 连接风暴期一次性 | **按主题名订阅**（telemetry.md §1；此前误判的"cmd 字节随主题"实为帧长 CRC8） |
 | 订阅 ACK | S2C | 对每个订阅请求 | 回显请求 id + 状态 |
+
+### 4.6 02/8E 参数 pid 总表（OA4）
+
+| pid | 语义 | 状态 | 常量（OSMOA4） |
+|---|---|---|---|
+| 0x0000 | Pro 模式开关（01 开 / 00 关） | ✅ 实锤 | `paramPro` |
+| 0x0008 | 电子增稳 EIS（码表 `eisModes`） | ✅ 实锤 | `paramEIS` |
+| 0x0009 | 视角 FOV（码表 `fovModes`） | ✅ 实锤 | `paramFOV` |
+| 0x000F | ISO 上限（码表 `isoMaxSteps`，仅自动曝光） | ✅ 实锤 | `paramISOMax` |
+| 0x0014 | 相机物理朝向（0 上 / 1 左 / 2 下 / 3 右） | ✅ 实锤 | `paramOrientation` |
+| 0x0030 | 弱光增稳开关（仅视频模式） | ✅ 实锤 | `paramLowLight` |
+| 0x000A | 未知（01↔00 翻转观测，诊断日志） | ⏳ 轮询观测 | — |
+| 0x0018 / 0x0020 / 0x0029 | 未知 | ⏳ 轮询观测 | — |
+| 0x0006 / 0x0015 / 0x0028 | Mimo 观测到、语义不明 | ⏳ 勿盲发 | — |
+
+各实锤 pid 的抓包证据链见下文专节。GET/SET 帧格式见 §4.3。
 
 ## 5. 连接握手序列（19:52:35.4–35.6，已证实）
 
@@ -125,9 +161,10 @@ S2C  订阅 ACK + 首值推送（cmdType 0x00 族）
 ## 6. 未定项
 
 1. ~~CRC 算法~~ **已解决**：crc8（0x8C/0x77）+ CRC16-MCRF4XX（0x8408/0x3692），`docs/protocol/tools/parse_mimo_capture.py --crc-test` 可复算；
-2. 录制**停止**命令未定（候选 (0x40, 0x80, 0x1A) 相关；需受控单次起/停抓包）；
-3. CmdId 0x8E 属性表、订阅 ACK 状态码表；
-4. 直播模式（0x0A）在本变更中不实现，仅存档观察。
+2. ~~录制停止命令~~ **已解决**：02/02 payload `00`（§4.2，真机验证）；
+3. 02/8E pid 0x000A / 0x0018 / 0x0020 / 0x0029 语义（诊断轮询观测中，见 unknown-signals-report.md）；
+4. camcap_* 能力表逐项订阅支持性（实测仅 camcap_common 推送、其余应答 01，见 topics-catalog §2）；
+5. 直播模式（0x0A）不实现，仅存档观察。
 
 ## 数码变焦与视角码表（2026-11-08 官方 Mimo 抓包实锤）
 
@@ -296,10 +333,12 @@ GET 回读接入参数轮询。
 
 ### 命名主题订阅全集与录制时长（2026-11-11 接入）
 
-订阅从 6 主题扩容为官方 Mimo 同款 **20 主题**（清单见 unknown-signals-report.md）。
+订阅从 6 主题扩容为官方 Mimo 同款 **20 主题**（清单与逐主题布局见 topics-catalog.md，
+已解析 8 个：cam_status / record_time / expo / lapse / video_param_v2 / lens_state /
+image_effect / portrait_mode）。
 `cam_record_time` 数据段布局实锤（u32 秒 @0 + u16 保留，录制中逐秒递增、39 次变化与
 启停对齐）——App 端 REC 计时/已录时长优先取该推送（`recordSeconds`），02/80 内的
-clipSeconds 作为兜底。其余 14 主题布局未实锤：App 端原始 hex 记录到诊断面板
+clipSeconds 作为兜底。其余布局未实锤的主题：App 端原始 hex 记录到诊断面板
 「未知信号」区（值变化才更新），布局实锤前不做语义解析。
 
 ### 00/76 固件动作事件与 00/4A 相机对时（已接入）

@@ -63,7 +63,8 @@ public final class OSMOCameraLink {
     /// 相机状态快照变化（节流 ~0.5s 一次，datalink 线程）
     public var onStatus: ((OSMOStatusSnapshot) -> Void)?
 
-    /// 状态跟踪：解析 02/80、0D/02、02/DC、00/99 推送与 02/19/1F/2B/29/2D 查询应答
+    /// 状态跟踪：解析 02/80、0D/02、02/DC、00/99 推送、00/76 事件与
+    /// 02/1F/2B/29/2D/13/8E 查询应答（02/19 已退役，仅存活探测兼容）
     let statusTracker = OSMOStatusTracker()
     /// 事件回调（00/76 固件动作事件 event_id；失败事件由上层 toast）
     public var onEventFailure: ((String) -> Void)?
@@ -246,7 +247,10 @@ public final class OSMOCameraLink {
         pokeConnection?.cancel()
     }
 
-    public func send(cmdSet: UInt8, cmdId: UInt8, payload: Data = Data(), receiver: UInt8? = nil, flags: UInt8 = 0x40) {
+    /// 单发命令帧。flags 恒为 0x40（请求位）——osmocam 参考实现对部分保活帧用
+    /// 0x80/0xC0，OA4 真机全程以 0x40 验证通过，保持实测行为（历史调用点曾误传
+    /// flags 参数但被本方法忽略，2026-11-13 审计移除该死参数）。
+    public func send(cmdSet: UInt8, cmdId: UInt8, payload: Data = Data(), receiver: UInt8? = nil) {
         let recv = receiver ?? ((cmdSet == 0x09 && cmdId == 0xA8) ? addrLiveView : addrCamera)
         let seq = messageSeq
         messageSeq = (messageSeq &+ 1) & 0xFFFF
@@ -570,10 +574,10 @@ public final class OSMOCameraLink {
         sendStatusSubscriptions()
         send(cmdSet: 0x02, cmdId: 0x09, payload: Data(count: 10) + Data([0x03]))
         requestKeyframe()
-        send(cmdSet: 0x00, cmdId: 0x81, payload: appInfoReply, receiver: addrEncoder2, flags: 0x80)
+        send(cmdSet: 0x00, cmdId: 0x81, payload: appInfoReply, receiver: addrEncoder2)
         send(cmdSet: 0x00, cmdId: 0x88, payload: encoderRegister, receiver: addrEncoder1)
-        send(cmdSet: 0x00, cmdId: 0x81, payload: appInfoReply, receiver: addrEncoder2, flags: 0x80)
-        send(cmdSet: 0x00, cmdId: 0x82, payload: Data([0x00]), receiver: addrEncoder2, flags: 0x80)
+        send(cmdSet: 0x00, cmdId: 0x81, payload: appInfoReply, receiver: addrEncoder2)
+        send(cmdSet: 0x00, cmdId: 0x82, payload: Data([0x00]), receiver: addrEncoder2)
         log("[osmo] live view requested (Action)")
         // 注册/订阅落定后再查询当前参数（应答由 parseDUML → statusTracker 捕获）
         queue.asyncAfter(deadline: .now() + 1.0) { [weak self] in
@@ -672,7 +676,9 @@ public final class OSMOCameraLink {
     }
 
     /// 当前拍摄模式下的参数查询（一次一条，间隔 0.3s——osmocam §5.9：单发等应答）。
-    /// 回读走 statusTracker（02/19/1F/2B/29/2D/13/8E 应答解析），UI 以回读为准。
+    /// 触发点：连接落定 / 拍摄模式切换 / 3s 参数轮询 / 设置成功后 0.5s 校准。
+    /// 回读走 statusTracker（02/1F/2B/29/2D/13/8E 应答解析）；视频格式已由
+    /// cam_video_param_v2 推送驱动，不再轮询。UI 以回读为准。
     private func sendStatusQueries() {
         // 按模式裁剪查询：无效查询（如照片模式读视频格式）会被相机 DF 拒绝，直接不发
         let mode = statusTracker.snapshot.captureMode
@@ -742,18 +748,18 @@ public final class OSMOCameraLink {
             p.append(contentsOf: [0xFF, 0xFF, 0xFF, 0xFF])
             self.send(cmdSet: 0x00, cmdId: 0x4F, payload: p, receiver: self.addrEncoder2)
             // 老协议 statusPoll 保活组合移植（真机实证：缺失时相机视频掉到 3 帧/min）：
-            // (40,00,51)[04]@0x48 + (80,00,82)@0x48 每 1s；(c0,00,00)@0x28 每 4s
+            // (00,51)[04]@0x48 + (00,82)@0x48 随心跳基频 0.2s；节奏表见 control-channel §4.4
             self.send(cmdSet: 0x00, cmdId: 0x51, payload: Data([0x04]), receiver: 0x48)
-            self.send(cmdSet: 0x00, cmdId: 0x82, payload: Data(), receiver: 0x48, flags: 0x80)
+            self.send(cmdSet: 0x00, cmdId: 0x82, payload: Data(), receiver: 0x48)
             if self.heartbeatTick % 5 == 0 {
                 self.send(cmdSet: 0x00, cmdId: 0x88, payload: self.encoderRegister, receiver: self.addrEncoder1)
             }
             if self.heartbeatTick % 20 == 0 {
-                self.send(cmdSet: 0x00, cmdId: 0x00, payload: Data(), receiver: 0x28, flags: 0xC0)
+                self.send(cmdSet: 0x00, cmdId: 0x00, payload: Data(), receiver: 0x28)
             }
             if self.heartbeatTick % 10 == 0 {
-                self.send(cmdSet: 0x00, cmdId: 0x81, payload: self.appInfoReply, receiver: self.addrEncoder2, flags: 0x80)
-                self.send(cmdSet: 0x00, cmdId: 0x82, payload: Data([0x00]), receiver: self.addrEncoder2, flags: 0x80)
+                self.send(cmdSet: 0x00, cmdId: 0x81, payload: self.appInfoReply, receiver: self.addrEncoder2)
+                self.send(cmdSet: 0x00, cmdId: 0x82, payload: Data([0x00]), receiver: self.addrEncoder2)
             }
         }
         timer.resume()
@@ -828,7 +834,6 @@ public final class OSMOCameraLink {
             } else if self.lastStatsTime == nil {
                 self.lastStatsTime = now
             }
-            _ = kind
             if data.count < 8 {
                 if !self.isReady {
                     self.log("[osmo] 收到短包 \(data.count)B: \(data.map { String(format: "%02x", $0) }.joined().prefix(40))")
@@ -858,10 +863,9 @@ public final class OSMOCameraLink {
             frameAssembler.add(seq: seq, data: videoData, now: DispatchTime.now())
         case 1:
             guard data.count >= 34 else { break }
-            let b = [UInt8](data)
-            cursors[0] = UInt16(b[10]) | (UInt16(b[11]) << 8)
-            cursors[1] = UInt16(b[18]) | (UInt16(b[19]) << 8)
-            cursors[2] = UInt16(b[26]) | (UInt16(b[27]) << 8)
+            cursors[0] = UInt16(bytes[10]) | (UInt16(bytes[11]) << 8)
+            cursors[1] = UInt16(bytes[18]) | (UInt16(bytes[19]) << 8)
+            cursors[2] = UInt16(bytes[26]) | (UInt16(bytes[27]) << 8)
             if Int(cursors[2]) != ackedCursor {
                 ackedCursor = Int(cursors[2])
                 lock.lock()
@@ -885,8 +889,7 @@ public final class OSMOCameraLink {
 
     private func parseDUML(_ data: Data) {
         guard data.count > 8 else { return }
-        let body = data.subdata(in: 8..<data.count)
-        let bytes = [UInt8](body)
+        let bytes = Array(data.dropFirst(8))   // 单次转换（原 subdata + Array 双重复制）
         var offset = 0
         while offset + 13 <= bytes.count {
             guard bytes[offset] == 0x55 else { offset += 1; continue }

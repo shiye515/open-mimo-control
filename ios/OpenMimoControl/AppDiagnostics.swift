@@ -25,9 +25,7 @@ final class AppDiagnostics: ObservableObject {
     }
 
     func add(_ line: String) {
-        let fmt = DateFormatter()
-        fmt.dateFormat = "HH:mm:ss.SSS"
-        let stamped = "[\(fmt.string(from: Date()))] \(line)"
+        let stamped = "[\(Self.timestampFormatter.string(from: Date()))] \(line)"
         lines.append(stamped)
         if lines.count > 120 {
             lines.removeFirst(lines.count - 120)
@@ -46,6 +44,12 @@ final class AppDiagnostics: ObservableObject {
     /// 落盘专用串行队列：并发全局队列上多把 FileHandle 同时 seekToEnd/write 会交错截断
     /// （真机日志出现半行碎片、256KB 重建后写入停滞），必须串行化
     private static let logQueue = DispatchQueue(label: "diag.log.append", qos: .utility)
+    /// 时间戳格式化器（DateFormatter 构造开销大，逐行创建是热路径浪费；HH:mm:ss.SSS 固定格式）
+    private static let timestampFormatter: DateFormatter = {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "HH:mm:ss.SSS"
+        return fmt
+    }()
 
     /// 追加写沙盒文件（串行队列；超 256KB 环形重建——保留尾部 3/4，最近的测试事件
     /// 不因爆量整体丢失）。devicectl 可直接拉取。

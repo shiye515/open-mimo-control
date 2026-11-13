@@ -71,12 +71,12 @@ public final class OSMOMediaSession {
         }
         // 2. OA4/Pocket 路线：01/01 脉冲 A ×6 @20Hz → 脉冲 B @20Hz 直至确认（≤3s）
         for _ in 0..<6 {
-            link.send(cmdSet: 0x01, cmdId: 0x01, payload: OSMOMedia.playbackPulseA, flags: 0x00)
+            link.send(cmdSet: 0x01, cmdId: 0x01, payload: OSMOMedia.playbackPulseA)
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
         let deadline = Date().addingTimeInterval(3.0)
         while Date() < deadline {
-            link.send(cmdSet: 0x01, cmdId: 0x01, payload: OSMOMedia.playbackPulseB, flags: 0x00)
+            link.send(cmdSet: 0x01, cmdId: 0x01, payload: OSMOMedia.playbackPulseB)
             if await isConfirmed() {
                 log("[media] playback confirmed via 01/01 pulses")
                 startBeat()
@@ -116,9 +116,9 @@ public final class OSMOMediaSession {
         stopBeat()
         log("[media] leaving playback (mode target 0x\(String(preferredMode, radix: 16)))")
         for _ in 0..<6 {
+            // 参考实现 osmosis 此帧带 flags 0x00；OA4 真机以链路层恒定 0x40 验证通过
             link.send(cmdSet: 0x01, cmdId: 0x01,
-                      payload: Data([0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x04, 0x00]),
-                      flags: 0x00)
+                      payload: Data([0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x04, 0x00]))
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
         link.send(cmdSet: 0x02, cmdId: 0x0C, payload: Data([0x01, 0x01, 0x00, 0x00]))

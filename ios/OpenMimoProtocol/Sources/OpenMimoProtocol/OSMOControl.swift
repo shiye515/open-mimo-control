@@ -21,8 +21,8 @@ public enum OSMOCommandError: Error, LocalizedError {
 
 /// Osmo Action 4 参数表与控制命令封装（osmo-client camlink/camera.py，OA4 实测验证）。
 ///
-/// 命令集 0x02 → receiver 0x01；OA4 不发布 camcap_* 能力主题（全应答 01），
-/// 各模式值域由本表硬编码驱动（design D-ctrl）。
+/// 命令集 0x02 → receiver 0x01；OA4 能力表仅 camcap_common 有推送，其余 camcap_*
+/// 逐项订阅应答 01（topics-catalog §2）——各模式值域由本表硬编码驱动（design D-ctrl）。
 public enum OSMOA4 {
 
     // MARK: 模式与结果码
@@ -224,8 +224,8 @@ public enum OSMOA4 {
     /// 弱光增稳开关（2026-11-10 官方 Mimo 抓包实锤：4 次开关操作 → SET 01/00/01/00 交替，
     /// 全程唯一 SET 序列；ACK 单字节 00。仅视频模式）
     public static let paramLowLight: UInt16 = 0x0030
-    /// 画面旋转象限（2026-11-10 旋转抓包实锤：顺时针转 90/180/270/360° → 值 3/2/1/0，
-    /// 即 3 字节值 [0, 象限, 0]，象限 = 逆时针 90° 计数）。轮询驱动（~1s），无推送
+    /// 相机物理朝向（2026-11-11 四向实测修正：顺时针转 90/180/270/360° → 值 3/2/1/0，
+    /// 即 0 上 / 1 左横置 / 2 下 / 3 右横置；3 字节值 [0, 朝向, 0]）。轮询驱动（~1s），无推送
     public static let paramOrientation: UInt16 = 0x0014
     /// 视角（FOV，02/8E 参数 0x0009）。OA4 码表经官方 Mimo 抓包实锤
     /// （zoom-capture-20261108：SET 序列 标准=02 → 广角=01 → 标准=02 → 窄=03，2026-11-08）。
