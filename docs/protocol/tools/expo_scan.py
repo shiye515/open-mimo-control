@@ -305,10 +305,48 @@ def show_matrix(hits):
         print(f"@{off:2d}  值域{len(vals):3d}  {marks}{extra}")
 
 
+def all_named_topics(path):
+    """{主题名: [(相对秒, 数据段 bytes)]}——单遍扫描收集全部 00/99 主题推送。"""
+    import io
+    from scapy.all import IP, UDP
+
+    raw = open(path, "rb").read()
+    rd = _reader_for(raw)
+    topics, t0 = {}, None
+    for pkt in rd:
+        if IP not in pkt or UDP not in pkt:
+            continue
+        if 9004 not in (pkt[UDP].sport, pkt[UDP].dport):
+            continue
+        if t0 is None:
+            t0 = float(pkt.time)
+        ts = float(pkt.time) - t0
+        for fr in extract_duml(bytes(pkt[UDP].payload)):
+            if (fr["cmdSet"], fr["cmdId"]) != (0x00, 0x99):
+                continue
+            name, data = _split_topic_push(fr["payload"])
+            if name:
+                topics.setdefault(name, []).append((ts, data))
+    return topics
+
+
+def show_all_topics_matrix(path):
+    """全部主题逐字节矩阵汇总（一次 pcap 读取）。"""
+    topics = all_named_topics(path)
+    print(f"主题数: {len(topics)}")
+    for name in sorted(topics):
+        hits = topics[name]
+        print(f"\n{'=' * 24} {name}（{len(hits)} 帧, {max(len(d) for _, d in hits)}B）{'=' * 24}")
+        show_matrix(hits)
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
         sys.exit(1)
+    if "--all" in sys.argv:
+        show_all_topics_matrix(sys.argv[1])
+        return
     hits = topic_frames(sys.argv[1])
     if "--matrix" in sys.argv:
         show_matrix(hits)

@@ -228,15 +228,17 @@ final class OSMOStatusParsingTests: XCTestCase {
 
     func testVideoParamV2Topic() {
         let t = OSMOStatusTracker()
-        // OA4 实测布局（2026-11-11 抓包）：@0 分辨率码、@1 帧率码 u8；
-        // 6 次分辨率变化 + 2 次帧率变化（60↔24）与用户操作逐一对应
+        // OA4 实测 10B 帧（2026-11-11 抓包）：@0 分辨率码、@1 帧率码；
+        // @4=04/@8=01 疑似 4K 16:9 编码档（mimo 3 切换点吻合，回归会话反向样本待 APK）
+        let d: [UInt8] = [0x10, 0x06, 0x00, 0x00, 0x04, 0x02, 0x01, 0x00, 0x01, 0x00]
         t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
-                 payload: topicFrame(name: "cam_video_param_v2", data: [0x10, 0x06]))
+                 payload: topicFrame(name: "cam_video_param_v2", data: d))
 
         XCTAssertEqual(t.snapshot.videoResolutionCode, 0x10)
         XCTAssertEqual(t.snapshot.videoResolutionName, "4K 16:9")
         XCTAssertEqual(t.snapshot.videoFpsCode, 0x06)
         XCTAssertEqual(t.snapshot.videoFpsName, "60")
+        XCTAssertEqual(t.snapshot.topicDecoded["cam_video_param_v2"], "编码档 @4=4 @8=1")
     }
 
     func testImageEffectAndLapseTopics() {
@@ -327,15 +329,64 @@ final class OSMOStatusParsingTests: XCTestCase {
 
     func testRawTopicSampleRecordedOnChangeOnly() {
         let t = OSMOStatusTracker()
+        let spData: [UInt8] = [UInt8](repeating: 0, count: 16)
+        t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
+                 payload: Data(topicPush(name: "shutter_param", data: spData)))
+        XCTAssertEqual(t.snapshot.rawTopicSamples["shutter_param"], spData.map { String(format: "%02x", $0) }.joined())
+        // 相同数据重复推送不产生变化（快照引用相同 hex）
+        t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
+                 payload: Data(topicPush(name: "shutter_param", data: spData)))
+        XCTAssertEqual(t.snapshot.rawTopicSamples["shutter_param"], spData.map { String(format: "%02x", $0) }.joined())
+    }
+
+    /// cam_fov 破译结果（2026-11-14）：读出区宽高 + @12-13 变化域
+    func testFovDecoded() {
+        let t = OSMOStatusTracker()
         let fovData: [UInt8] = [0x6d, 0x09, 0x00, 0x00, 0x11, 0x07, 0x00, 0x00,
                                 0x01, 0x00, 0x00, 0x00, 0x38, 0x31, 0x00, 0x00]
         t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
                  payload: Data(topicPush(name: "cam_fov", data: fovData)))
-        XCTAssertEqual(t.snapshot.rawTopicSamples["cam_fov"], fovData.map { String(format: "%02x", $0) }.joined())
-        // 相同数据重复推送不产生变化（快照引用相同 hex）
+        XCTAssertNil(t.snapshot.rawTopicSamples["cam_fov"])   // 已转解码，不再进未知区
+        XCTAssertEqual(t.snapshot.topicDecoded["cam_fov"],
+                       "读出区 2413×1809 · @12-13=0x3138")
+    }
+
+    /// cam_storage / cam_status / timecode_info / cam_photo_param / cam_audio 破译摘要
+    func testTopicDecodedSummaries() {
+        let t = OSMOStatusTracker()
+
+        var st = [UInt8](repeating: 0, count: 22)
+        st[10] = 0xb0; st[11] = 0xc2; st[12] = 0x01; st[13] = 0x00       // 剩余可录 115,376s
+        st[14] = 0x96; st[15] = 0x3c; st[16] = 0x00                      // 剩余可拍 15,510 张
+        st[18] = 0x5f; st[19] = 0x22                                     // 折算 8,799s
         t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
-                 payload: Data(topicPush(name: "cam_fov", data: fovData)))
-        XCTAssertEqual(t.snapshot.rawTopicSamples["cam_fov"], fovData.map { String(format: "%02x", $0) }.joined())
+                 payload: Data(topicPush(name: "cam_storage", data: st)))
+        XCTAssertEqual(t.snapshot.topicDecoded["cam_storage"],
+                       "可录 115376s · 可拍 15510 张 · 折算 8799s")
+
+        var cs = [UInt8](repeating: 0, count: 9)
+        cs[0] = 0x10; cs[4] = 0x01; cs[7] = 0x02                          // 录制中
+        t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
+                 payload: Data(topicPush(name: "cam_status", data: cs)))
+        XCTAssertEqual(t.snapshot.topicDecoded["cam_status"], "模式 0x01 · 录制 录制 · 位图 0x10")
+
+        var tc = [UInt8](repeating: 0, count: 8)
+        tc[5] = 0x2a; tc[6] = 0x0f
+        t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
+                 payload: Data(topicPush(name: "timecode_info", data: tc)))
+        XCTAssertEqual(t.snapshot.topicDecoded["timecode_info"], "计 42s · 递减 15")
+
+        var pp = [UInt8](repeating: 0, count: 13)
+        pp[11] = 0x03
+        t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
+                 payload: Data(topicPush(name: "cam_photo_param", data: pp)))
+        XCTAssertEqual(t.snapshot.topicDecoded["cam_photo_param"], "倒计 3s · 动作 0x00")
+
+        var au = [UInt8](repeating: 0, count: 14)
+        au[3] = 0x40; au[7] = 0x30; au[9] = 0x20; au[11] = 0x64
+        t.handle(cmdSet: 0x00, cmdId: 0x99, sender: 0x28,
+                 payload: Data(topicPush(name: "cam_audio_status_v2", data: au)))
+        XCTAssertEqual(t.snapshot.topicDecoded["cam_audio_status_v2"], "电平 64/48/32（满 100）")
     }
 
     func testUnknownParamRawReadsAnd0AFlipLog() {

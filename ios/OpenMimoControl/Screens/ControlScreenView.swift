@@ -1184,6 +1184,25 @@ struct ControlScreenView: View {
                             Spacer(minLength: 0)
                         }
                     }
+                    // 主题推送解析（00/99 订阅主题已解码字段，按主题分组）
+                    if !topicPushRows.isEmpty {
+                        Divider().overlay(OC.stroke).padding(.vertical, 6)
+                        Text("主题推送解析")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(OC.textSecondary)
+                        ForEach(topicPushRows, id: \.0) { row in
+                            HStack(alignment: .firstTextBaseline) {
+                                Text(row.0)
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(OC.textSecondary)
+                                    .frame(width: 132, alignment: .leading)
+                                Text(row.1)
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(OC.textPrimary)
+                                Spacer(minLength: 0)
+                            }
+                        }
+                    }
                     if !st.queryErrors.isEmpty {
                         Text("查询错误: " + st.queryErrors
                             .map { "\($0.key)=0x\(String(format: "%02X", $0.value))" }
@@ -1284,6 +1303,46 @@ struct ControlScreenView: View {
             ("预览帧数", "\(flow.osmoFrameCount)"),
             ("状态更新", st.lastUpdate.map { Self.timeText($0) } ?? "—"),
         ]
+    }
+
+    /// 主题推送解析区（00/99 订阅主题的已解码字段，按主题分组；来源映射见 status-sources.md）
+    private var topicPushRows: [(String, String)] {
+        var rows: [(String, String)] = []
+
+        var expo: [String] = []
+        if let v = st.expoCompName { expo.append("EV \(v)") }
+        if let v = st.exposureModeName { expo.append("模式 \(v)") }
+        if let v = st.effectiveISO { expo.append("ISO \(v)") }
+        if let v = st.isoStepCode { expo.append(String(format: "档码 0x%02X", v)) }
+        if let v = st.effectiveShutterName { expo.append("快门 \(v)") }
+        if let v = st.photoShutterName { expo.append("拍照快门 \(v)") }
+        if let v = st.lightMeterName { expo.append("测光 \(v)") }
+        if let v = st.digitalGain {
+            expo.append("数字增益 \(v).\(st.digitalGainFine.map(String.init) ?? "?")")
+        }
+        if !expo.isEmpty { rows.append(("cam_expo_param", expo.joined(separator: " · "))) }
+
+        if st.videoResolutionName != nil || st.videoFpsName != nil {
+            let parts = [st.videoResolutionName, st.videoFpsName.map { "\($0)fps" }]
+                .compactMap { $0 }
+            rows.append(("cam_video_param_v2", parts.joined(separator: " · ")))
+        }
+        if let z = st.zoomFactor { rows.append(("cam_lens_state", "变焦 \(z)x")) }
+
+        var effect: [String] = []
+        if let v = st.colorProfileName { effect.append("色彩 \(v)") }
+        if let v = st.sharpness { effect.append("锐度 \(v)") }
+        if let v = st.denoise { effect.append("降噪 \(v)") }
+        if !effect.isEmpty { rows.append(("cam_image_effect", effect.joined(separator: " · "))) }
+
+        if st.lapseIntervalDeciS != nil || st.lapseDurationS != nil || st.lapseSpeed != nil {
+            rows.append(("cam_lapse_param", lapseText))
+        }
+        if let s = st.recordSeconds {
+            rows.append(("cam_record_time", "已录 \(Self.durationText(Int64(s)))"))
+        }
+        if let p = st.portraitMode { rows.append(("cam_portrait_mode", p ? "竖拍" : "横拍")) }
+        return rows
     }
 
     private var lapseText: String {

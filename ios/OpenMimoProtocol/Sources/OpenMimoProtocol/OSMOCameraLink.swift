@@ -628,15 +628,10 @@ public final class OSMOCameraLink {
         "audio_timecode_status", "timecode_info", "temp_curve", "cam_imu_calib_info",
     ]
 
-    /// 能力表探测组（三方 §8.4 记录的 camcap_* 全家族，OA4 支持性未验证）：
-    /// 2026-11-11 用户要求全量订阅测试，应答逐一确认后裁剪不支持的
+    /// 能力表探测组：OA4 实测仅 camcap_common 有推送、其余 19 项逐项订阅应答 01
+    /// （2026-11-11 全量订阅测试 + 多会话确认）——只保留有效项，省 19 帧订阅/连接
     static let capabilityProbeTopics = [
-        "camcap_base", "camcap_video_format", "camcap_iso", "camcap_shutter",
-        "camcap_photo_size", "camcap_wb", "camcap_exposure_mode", "camcap_color_mode",
-        "camcap_fov", "camcap_eis", "camcap_sharpness", "camcap_denoise",
-        "camcap_photo_timer_interval", "camcap_timelapse_duration", "camcap_hyperlapse_ratio",
-        "camcap_capture_aspect_type", "camcap_iso_auto_max", "camcap_countdown",
-        "camcap_loop_video_duration", "camcap_slowmotion_ratio",
+        "camcap_common",
     ]
 
     private func sendStatusSubscriptions() {
@@ -677,10 +672,10 @@ public final class OSMOCameraLink {
 
     /// 当前拍摄模式下的参数查询（一次一条，间隔 0.3s——osmocam §5.9：单发等应答）。
     /// 触发点：连接落定 / 拍摄模式切换 / 3s 参数轮询 / 设置成功后 0.5s 校准。
-    /// 推送驱动裁剪（cam-expo-param.md）：视频格式（cam_video_param_v2）、曝光模式与
-    /// 生效 ISO/快门全精度含小数（cam_expo_param @7/@16-17/@20-22）均已由订阅推送覆盖——
-    /// 02/1F、02/29 退役；02/2B 仅手动模式轮询（滚轮定位需档位码，自动模式下恒回 00 无信息量）。
-    /// 回读走 statusTracker（02/2B/2D/13/8E 应答解析）。UI 以回读为准。
+    /// 推送驱动裁剪（cam-expo-param.md / status-sources.md）：视频格式（cam_video_param_v2）、
+    /// 曝光模式（@7）、生效 ISO 含档位码（@16-17 + isoCode 反查）、快门全精度含小数（@20-22）
+    /// 均已由 cam_expo_param 订阅推送覆盖——02/1F、02/29、02/2B 全部退役；
+    /// 白平衡（02/2D）、02/8E 家族、02/13 不在流中，保留轮询。UI 以回读为准。
     private func sendStatusQueries() {
         // 按模式裁剪查询：无效查询（如照片模式读视频格式）会被相机 DF 拒绝，直接不发
         let mode = statusTracker.snapshot.captureMode
@@ -701,9 +696,7 @@ public final class OSMOCameraLink {
         if mode == OSMOA4.modePhoto {
             queries.insert((0x02, 0x13, Data()), at: 0)   // 照片格式（仅照片模式；视频格式由 cam_video_param_v2 推送驱动）
         }
-        if manual {
-            queries.append((0x02, 0x2B, Data()))          // ISO 档位码（手动曝光需滚轮定位；自动下恒回 00）
-        }
+        // 02/2B 已退役：isoCode 由 cam_expo_param @7 门控 + @16-17 反查（parseExpoParam）
         for (i, q) in queries.enumerated() {
             queue.asyncAfter(deadline: .now() + Double(i) * 0.3) { [weak self] in
                 guard let self, !self.stopped else { return }

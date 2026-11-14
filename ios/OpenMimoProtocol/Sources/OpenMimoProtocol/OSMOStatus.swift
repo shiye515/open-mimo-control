@@ -98,6 +98,8 @@ public struct OSMOStatusSnapshot: Equatable {
     public var rawTopicSamples: [String: String] = [:]
     /// 未解析 02/8E 参数 pid 的原始回读值（hex，诊断面板展示）
     public var rawParams: [UInt16: String] = [:]
+    /// 主题推送破译结果摘要（主题名 → 已解码字段串；详情面板「主题推送解析」区展示）
+    public var topicDecoded: [String: String] = [:]
     /// pid 0x000A 最新回读（诊断定位：01↔00 翻转语义未知）
     public var rawParam0A: UInt8?
     /// 相机竖拍模式（cam_portrait_mode 主题，竖拍安装时用于预览方向矫正）
@@ -424,11 +426,17 @@ public final class OSMOStatusTracker {
     }
 
     /// cam_video_param_v2：分辨率码 @0、帧率码 @1 u8（OA4 实测 2026-11-11，6 次分辨率 +
-    /// 2 次帧率变化与操作逐一对应；替代 02/19 轮询）
+    /// 2 次帧率变化与操作逐一对应；替代 02/19 轮询）。
+    /// @4=04/@8=01 疑似 4K 16:9 编码档（mimo 3 切换点吻合，回归会话出现反向样本，语义未定）
     private func parseVideoParamV2(_ d: [UInt8]) {
-        guard d.count >= 2 else { return }
+        guard d.count >= 9 else { return }
         snapshot.videoResolutionCode = d[0]
         snapshot.videoFpsCode = d[1]
+        let prev = snapshot.topicDecoded["cam_video_param_v2"]
+        let summary = "编码档 @4=\(d[4]) @8=\(d[8])"
+        if prev == nil || prev != summary {
+            snapshot.topicDecoded["cam_video_param_v2"] = summary
+        }
     }
 
     // MARK: 00/76 固件动作事件（JSON：拍照/录制/延时动作结果，三方无记录）
@@ -486,15 +494,19 @@ public final class OSMOStatusTracker {
             if data.count >= 4 {
                 snapshot.recordSeconds = le32(data, 0)
             }
-        case "cam_fov", "shutter_param", "cam_photo_param", "cam_photo_param_new",
+        case "cam_fov": decodeFov(data)
+        case "cam_photo_param": decodePhotoParam(data)
+        case "cam_storage": decodeStorage(data)
+        case "cam_status": decodeCamStatus(data)
+        case "cam_audio_status_v2": decodeAudioLevels(data)
+        case "timecode_info": decodeTimecode(data)
+        case "shutter_param", "cam_photo_param_new",
              "temp_curve", "camcap_common":
             // 语义未实锤的主题：原始数据段记录（值变化才更新），诊断面板展示供抓包 diff
             recordRawTopic(name, data)
-        case "cam_audio_status_v2", "cam_imu_calib_info", "cam_storage",
-             "cam_status", "cam_custom_mode_params", "cam_magnifier_status",
-             "v_quality_enhance_status", "audio_timecode_status", "timecode_info":
-            // 语义已明确的录制态/校准类主题（音频电平表、录制时码、容量更新等），
-            // 不进未知信号区；具体字段布局待后续抓包 diff，需要时在此接入专有解析
+        case "cam_imu_calib_info", "cam_custom_mode_params", "cam_magnifier_status",
+             "v_quality_enhance_status", "audio_timecode_status":
+            // 触发实验无变化的恒定主题（topics-catalog.md 已收口），无动态信息
             break
         default:
             if !loggedUnknownTopics.contains(name) {
@@ -522,7 +534,15 @@ public final class OSMOStatusTracker {
         }
         snapshot.isoStepCode = d[11]
         snapshot.lightMeterValue = d[15]
-        snapshot.effectiveISO = UInt32(le16(d, 16))
+        let isoValue = Int(le16(d, 16))
+        snapshot.effectiveISO = UInt32(isoValue)
+        // 用户 ISO 档位码：手动曝光=设定值精确反查（02/2B 同码表，手动 200/1600/12800
+        // 与 @16-17 精确映射实锤）、自动=00——02/2B 轮询退役依据
+        if d[7] == 0x04 {
+            snapshot.isoCode = OSMOA4.isoCodes.first { $0.value == isoValue }?.code
+        } else if d[7] == 0x01 {
+            snapshot.isoCode = 0x00
+        }
         snapshot.effectiveShutter = UInt32(le16(d, 20)) | UInt32(d[22]) << 16
         snapshot.digitalGain = le16(d, 33)
         snapshot.digitalGainFine = d[35]
@@ -538,12 +558,68 @@ public final class OSMOStatusTracker {
         }
     }
 
-    /// cam_image_effect：色彩档位 @2、降噪 s8 @14、锐度 s8 @15（osmocam §8.3）
+    /// cam_image_effect：色彩档位 @2、降噪 s8 @14、锐度 s8 @15（osmocam §8.3）；
+    /// @5/@6/@7 = 画面统计三通道（高频变，非设置域）
     private func parseImageEffect(_ d: [UInt8]) {
         guard d.count >= 16 else { return }
         snapshot.colorProfile = d[2]
         snapshot.denoise = Int8(bitPattern: d[14])
         snapshot.sharpness = Int8(bitPattern: d[15])
+        let s7 = Int8(bitPattern: d[7])
+        snapshot.topicDecoded["cam_image_effect"] =
+            "统计 \(d[5])/\(d[6])/\(s7)"
+    }
+
+    // MARK: 主题推送破译结果摘要（2026-11-14 全主题破解战役；详见 topics-catalog.md）
+
+    /// cam_storage 22B：@10-13 u32 剩余可录秒、@14-16 u24 剩余可拍张数、@18-19 折算量
+    /// （2026-11-14 录制窗口对齐实锤；与 02/80 photosLeft/videoSecondsLeft 同语义，未接线仅展示）
+    private func decodeStorage(_ d: [UInt8]) {
+        guard d.count >= 20 else { return }
+        let recSec = le32(d, 10)
+        let photos = Int(d[14]) | Int(d[15]) << 8 | Int(d[16]) << 16
+        let reserve = le16(d, 18)
+        snapshot.topicDecoded["cam_storage"] =
+            "可录 \(recSec)s · 可拍 \(photos) 张 · 折算 \(reserve)s"
+    }
+
+    /// cam_status 9B 紧凑状态帧：@0 状态位图、@3 管线标志、@4 captureMode、@7 录制状态
+    private func decodeCamStatus(_ d: [UInt8]) {
+        guard d.count >= 8 else { return }
+        let recName = ["空闲", "启动", "录制", "停止"][min(Int(d[7]), 3)]
+        snapshot.topicDecoded["cam_status"] =
+            "模式 0x\(String(format: "%02x", d[4])) · 录制 \(recName) · 位图 0x\(String(format: "%02x", d[0]))"
+    }
+
+    /// cam_fov 16B：@0-3/@4-7 读出区宽×高（u32，待机 4:3 形/录制 16:9 形）、@12-13 变化域（语义未定）
+    private func decodeFov(_ d: [UInt8]) {
+        guard d.count >= 14 else { return }
+        let w = le32(d, 0)
+        let h = le32(d, 4)
+        let z = le16(d, 12)
+        snapshot.topicDecoded["cam_fov"] =
+            "读出区 \(w)×\(h) · @12-13=0x\(String(format: "%04x", z))"
+    }
+
+    /// cam_photo_param 13B：@11 倒计秒（1Hz 递减至 0）、@0 拍摄动作标志
+    private func decodePhotoParam(_ d: [UInt8]) {
+        guard d.count >= 12 else { return }
+        snapshot.topicDecoded["cam_photo_param"] =
+            "倒计 \(d[11])s · 动作 0x\(String(format: "%02x", d[0]))"
+    }
+
+    /// cam_audio_status_v2：@3/@7/@9 三通道实时电平（0x64=满）
+    private func decodeAudioLevels(_ d: [UInt8]) {
+        guard d.count >= 10 else { return }
+        snapshot.topicDecoded["cam_audio_status_v2"] =
+            "电平 \(d[3])/\(d[7])/\(d[9])（满 \(d[11])）"
+    }
+
+    /// timecode_info 8B：@5 会话秒计数器、@6 递减位（语义未知）
+    private func decodeTimecode(_ d: [UInt8]) {
+        guard d.count >= 7 else { return }
+        snapshot.topicDecoded["timecode_info"] =
+            "计 \(d[5])s · 递减 \(d[6])"
     }
 
     /// cam_lapse_param：keep @0、间隔 u16 @1（0.1s）、时长 u32 @5（s）、速度 u16 @9（osmocam §8.3）
