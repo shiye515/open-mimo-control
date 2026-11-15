@@ -1,110 +1,131 @@
 # 状态遥测（telemetry）
 
-> 证据：docs/protocol/mimo-ios.pcap。所有主题名均为线上明文 ASCII。
+> 实现目标：订阅相机状态主题、解析周期推送。全部主题名以明文 ASCII 在线上传输，
+> 自描述协议。cmd 记法见 [duml-frame.md](duml-frame.md)。
 
-## 1. 订阅机制（已证实）
+## 1. 订阅（00 / 99）
 
-连接握手后，手机对每个主题发一条订阅帧（`0x55` 帧，cmd 随主题而异——推定为主题名的 8-bit 哈希，见 control-channel.md §4.5），body 形如：
+会话建立后，App 对每个主题发一条订阅帧：**(cmdType 0x00, cmdSet 0x00, cmdId 0x99)，
+dst = 0x28（相机主控）**。
+
+### 订阅帧 payload（31B 形态，订阅 cam_status 样例）
 
 ```
-[seq:2] [40 00 99 02 02 00 00] [req_id:2] [00 00 00 00] [total_len:2] [name_len:2] 00 [name] [pad] [crc]
+02 02 00 00 | id u32 LE | 00 00 00 | rest u16 | nameLen u16 | 00 | <主题名> | 00×4
 ```
 
-样例（订阅 cam_status）：`552a 049c 0228 e6a4 4000 99020200 00efd5 00000000 0010 000a 00 "cam_status" 00000000 [crc]`
+完整样例（订阅 cam_status，Android 官方 app）：
 
-相机逐条返回 `cmd=0x38` ACK（回显 req_id），并立即以推送帧下发首个值。
+```
+55 2a 04 9c | 02 28 | e6 a4 40 00 99 | 02 02 00 00 ef d5 00 00 00 00
+0010 000a 00 "cam_status" 00000000 | crc
+```
+
+（iOS 侧样例 body 同构：`[40 00 99 02 02 00 00] [req_id] [00000000] [0010] [000a] 00 "cam_status" …`）
+
+- **req_id**：自增；相机 ACK 回显该值
+- 应答单帧：`00` = 已订阅、`01` = 无此主题（按序匹配）
+- 订阅必须主动发起（会话建立后一次 21 帧），**相机重启前持续有效，重复订阅无副作用**
+- 完整订阅风暴在连接后 0.2s 内连发 21 帧
 
 ## 2. 推送帧
 
-推送承载于 `0x55` 帧（cmd 观测到 0x25/0xde/0xf9/0x70/0x21/0x67/0x1a/0x1e/0x93…，与主题相关），body 内嵌主题名与值：
+推送同样承载于 0x55 帧（cmdType 0x00，cmd 随主题相关的会话句柄），body 内嵌主题名：
 
 ```
-[seq:4] [99 02] [action] [handle:4] [00 00] [total_len:2] 00 [name_len:2] 00 [name] [pad] [value…]
+02 06 00 00 | seq u16 | 00×5 | rest u16 | nameLen u16 | <主题名> | 00×6 | dataLen u16 | <data>
 ```
 
-样例（cam_status 推送）：`…001d 000a 00 "cam_status" 00000000 0009 000000 55 01 01 00 01 0000`
+- **OA4 特性：周期性全量推送**（~2-4s/主题错峰），非"仅变化时推送"——
+  值变化只体现在 data 内容层
+- 明文自描述：解析器按主题名分发，无需硬编码 cmd 映射
 
-## 3. 本次连接订阅的全部主题（19:52:35.55，已证实）
+## 3. 主题清单与推送频率（21 key 实测）
 
-`cam_status`、`cam_record_time`、`cam_storage`、`cam_fov`、`cam_photo_param`、`cam_lapser_param`、`cam_video_param_v2`、`cam_expo_param`、`cam_lens_state`、`cam_image_effect`、`shutter_param`、`camcap_common`、`camcap_custom_mode_params`、`cam_fov`、`cam_audio_status_v2`、`audio_timecode_status`、`timecode_info`、`temp_curve`、`cam_imu_calib_info`、`cam_magnifier_status`、`cam_fov`、`v_quality_enhance_status`、`cam_custom_mode_params`
+| 主题 | 推送频率（Android 实测包数/107,888 S2C 包） | 数据段布局状态 |
+|---|---|---|
+| cam_record_time | 1127（高频 4.4/s） | ✅ u32 秒 @0 |
+| cam_audio_status_v2 | 1127 | ✅ 电平表 |
+| cam_imu_calib_info | 1127 | 恒定 |
+| cam_status | 566（2.2/s） | ✅ 9B 状态帧 |
+| cam_storage | 564 | ✅ 22B |
+| cam_expo_param | 564 | ✅ 41B 全字段 |
+| shutter_param | 564 | 恒零（无动态信息） |
+| cam_photo_param | 564 | ⏳ @11 倒计秒待复核 |
+| cam_lapse_param | 564 | ✅ |
+| cam_video_param_v2 | 564 | ✅ @0/@1（@4/@8 待定） |
+| cam_image_effect | 564 | ✅ 色彩/降噪/锐度 |
+| v_quality_enhance_status | 564 | 恒 00 |
+| cam_fov | 564 | ◐ 读出区宽高（@12-13 待定） |
+| cam_lens_state | 564 | ✅ lens ÷126 |
+| audio_timecode_status | 564 | 恒 00 |
+| cam_custom_mode_param | 564 | 结构已见语义待定 |
+| cam_magnifier_status | 564 | 恒定 |
+| timecode_info | 228 | ◐ @5 会话秒 |
+| temp_curve | 227 | 恒定 |
+| camcap_common | 2 | 一次性能力帧 |
+| camcap_iso 等 camcap_* | 0 | ❌ 订阅应答 01（OA4 不支持逐项） |
 
-## 4. 关键主题值结构（已证实，经状态变化时间轴对齐）
+## 4. 已实锤值结构（重点主题）
 
-### cam_status（9B：`55 [mode] [target] 00 [zoom_idx] [state] 00`）
+### cam_status（9B 紧凑状态帧）
 
-| 字节 | 含义 | 观测值 |
-| --- | --- | --- |
-| +1 | 当前模式 | 00=照片, 01=视频, 02=慢动作, 05=延时(推定), 0a=直播(推定) |
-| +2 | 目标模式（切换过渡期） | 同上值域 |
-| +4 | 变焦档位 | 00/01/02/03（与 cam_fov 焦距联动：24.1→48.3→36.2mm） |
-| +5 | 子状态 | 00=待机, 01=预览, 02=切换中, 03=录制中, 05=连拍/延时执行 |
+`@0` 状态位图（08 写文件/10 录制/80 特殊模式）· `@3` 管线标志（0 视频/1 照片系/7 特殊）
+· `@4` captureMode（与 02/E1 同码：00 照片/01 视频/02 慢动作/05 延时/0A 直播）
+· `@7` 录制状态（0 待机/1/2/3 录制中）· `@6` 心跳翻转位。
+旧版 9B 解读（+1 模式/+2 目标模式/+4 变焦档/+5 子状态）为 iOS 侧不同固件版本观测。
 
-样例：`55 01 01 00 01 0200`（视频模式、变焦 2 档、切换中）。
+### cam_record_time（6B）
 
-### cam_record_time
+`u32 秒 @0 + u16 保留`——录制中逐秒递增、停止归 0。**REC 计时首选来源**。
 
-推送周期 1s（仅录制中）；值区 `[0006] [seconds…]`，观测 1→12 递增、停止归 0。
+### cam_expo_param（41B 固定布局，全字段实锤）
 
-### cam_fov（等效焦距，×100 mm，u32 LE）
+| 偏移 | 内容 |
+|---|---|
+| @2-3 | 拍照快门 u16（0x8000\|分母，拍照子系统） |
+| @6 | **EV 补偿码**（码 16=0EV、1/3 档；各模式独立记忆，全模式直读） |
+| @7 | 曝光模式标志（1=自动 / 4=手动） |
+| @11 | 生效 ISO 标准档位码（手动恒 00） |
+| @15 | 测光 EV 码（画面偏离 0EV 程度） |
+| @16-17 | 生效 ISO u16（AE 实时增益；手动=设定值；受 ISO MAX 钳制） |
+| @20-22 | 视频/预览快门三元组（0x8000\|分母 u16 + 小数字节，与 02/28 同构） |
+| @33-35 | 数字增益 u16 + 十分位 |
 
-| 值 | 含义 |
-| --- | --- |
-| `6d09 0000` | 24.13mm（1.0x） |
-| `da12 0000` | 48.26mm（2.0x） |
-| `230e0000` | 36.19mm（1.5x） |
+曝光三参数联动（自动模式）：ISO 在 [100, ISO MAX] 细步进 → 触顶后快门接棒
+（视频上限 1/25s）→ 双触顶后数字增益延伸。白平衡/色彩/Pro/弱光/变焦**不在此流中**
+（各走独立命令/主题）。字段地图与实验证据链见
+[protocol-raw/cam-expo-param.md](../protocol-raw/cam-expo-param.md)。
 
-后随 `1107 0000 / 9a0a 0000` 等字段（第二焦距/光圈相关，未定）。变焦 UI 可直接由该值换算倍率（焦距 ÷ 24.13）。
+### cam_video_param_v2（10B）
 
-### cam_storage
+`@0` 分辨率码、`@1` 帧率码（码表见 [commands.md](commands.md) §11）——
+分辨率/帧率变化的读取通道（02/19 轮询已退役）。
 
-值区含容量字段（录制期间持续下降），样例：
-`1600 0012 0100 0001 f3cf0100 b0c20100 00000000 5f220000` —— 布局未逐字段定案；录制 12s 期间尾部可用量字段 `5f22→5422` 变化对应写盘量。
+### cam_storage（22B）
 
-### cam_photo_param / cam_lapser_param
+`@10-13` 剩余可录秒 u32（录制递减；慢动作 ~16× 消耗）· `@14-16` 剩余可拍张数 u24
+（分模式重算）· `@18-19` 剩余可录量 u16（按当前模式码率折算）。
 
-延时摄影执行期观测到 **5→1 秒倒计时**（值尾 `05 01→04 01→…→00 01`，每秒一推）。
+### cam_lens_state（47B）/ cam_fov（16B）/ cam_audio_status_v2（114B）
 
-## 5. 遥测周期小结
+- cam_lens_state：`@14-15` lens u16（÷126）、`@12-13` 同源变焦位置副本
+- cam_fov：`@0-3/@4-7` 读出区宽/高 u32（待机 4:3 形 2413×1809 / 录制 16:9 形
+  4596×2585 / 夜景 2394×1350）；`@8` 管线标志；`@12-13` 变化域（待定）
+- cam_audio_status_v2：`@3/@7/@9` 三通道实时电平（0x64=满）
 
-| 主题 | 周期 |
-| --- | --- |
-| cam_status | 状态变化即推 + ~1.2s 心跳式重推 |
-| cam_record_time | 录制中 1s |
-| cam_storage | ~1.1s（录制中更密） |
-| cam_fov | 变焦变化即推 |
-| 其余 | 变化即推 |
+## 5. 订阅与轮询的分工（重要）
 
-## 6. iOS 实现现状（2026-10-28 三轮更新，遥测已上线）
+- **有推送主题的状态一律用订阅**（本次 21 key 覆盖全部遥测需求）——
+  02/8E GET 轮询仅用于**无推送主题**的参数（朝向 0x0014、EIS 0x0008、
+  ISO MAX 0x000F、Pro 0x0000、弱光 0x0030 等）
+- 两类机制互补：推送是周期性全量（OA4），轮询是按需点名
+- camcap_* 能力表主题 OA4 实测仅 camcap_common 推送一次（能力值域不可
+  从相机自描述，档位表需按机型硬编码——见 commands.md 各码表）
 
-订阅/推送机制是**明文**且自描述（带主题名）。**真机已验证的遥测链路**：
+## 证据
 
-- **WiFi 侧 (0x02,0x80) 设备状态推送**（无需订阅，UDP 会话建立后相机每 ~1s 主动推，BLE/UDP 同构）：
-  payload 布局 `[01][02][80][00 00][xx][total_mb:4 LE][free_mb:4 LE][photo:4 LE]…`。
-  实时验证：total=118,771MB、free=118,858MB、photo=1,499 每秒刷新，UI 状态条显示 SD 110.9GB ✓。
-  注意 free 可 > total（相机两字段语义不完全对齐，疑 total=用户可用、free=含保留区）。
-- **会话层四连修复（遥测上线的完整根因链，2026-10-28）**：
-  ① NWCameraLink struct State 遮蔽 → 全部 UDP 发送静默失败（改 class）；
-  ② 外层包头布局错误 → 最终破译为 20B 业务头 `[len][session:3][seq8:2 步进+8][token 0501][ackBase][seq8回显][0000][外层序号:4 起始0x0101]`；
-  ③ **NWConnection.receive 对 UDP 首包即返回 isComplete=true（iOS 真机实测）——不能当流结束**，需无错误时继续收包（此前每轮只收 1 包即自毁重连）；
-  ④ ConnectView 的 `onSessionCreated` 在 SwiftUI init 里挂接会丢到临时 @StateObject 实例上，需移至 onAppear。
-- 电量：直连路径无 BLE 推送源（相机已停 BLE 广播），UI 显示缓存值/—；BLE 场景（完整连接）
-  (0x0d,0x02) 推送 @20 u16 LE = 电量百分比（充电中样本 0x0064=100 实测），经 UserDefaults 桥接入遥测。
-- 1D05/1D02 订阅探测已实装待验证（WiFi 会话内无 ACK——对 OA4 的兼容性未确认）。
-
-## 7. 电量主题调查结论（2026-10-28 专项）
-
-**WiFi 主题空间不存在电量主题**（三重证据）：
-1. pcap 全程 ASCII 检索：23 个主题无一含 battery/power；
-2. libdjisdk_jni.so 主题名清单（48 个 cam_*/相关主题）：无电量主题；
-3. 官方 App 电量 UI 显示期间，WiFi 抓包无任何电量数据到达。
-
-电量的真实来源（两条候选路径，均已有协议定义）：
-
-| 路径 | 命令 | 结构 | 来源 |
-| --- | --- | --- | --- |
-| 官方遥控器状态推送 | (0x40,0x1D,0x05) 订阅 → (0x1D,0x02) 推送 | 38B，**电量 uint8 @37**，另有 SD 剩余@15、录制秒@5、分辨率@2、帧率@3 | osmo-gps-controller/protocol_data_segment_CN.md（官方文档级） |
-| BLE 裸推送 | (0x0D,0x02) ~1Hz | varies（布局未定案） | dji-reversing/lib-osmo-ble/PROTOCOL.md 遥测表 |
-
-注：BLE (0x02,0xDC) 相机变体推送（~2Hz 22B）已在 XS 实测出现，payload 与 cam_storage 值同构——
-两代设备的裸命令空间共通。iOS 已实现：1D05 订阅探测（startWMSProbe 附加）+ 1D02 解析（CameraStatusV2）
-+ BLE (0d,02)/(02,dc) 推送日志；全部待真机验证。
+- [protocol-raw/telemetry.md](../protocol-raw/telemetry.md)（订阅/推送帧格式、值结构、电量主题调查）
+- [protocol-raw/topics-catalog.md](../protocol-raw/topics-catalog.md)（20 主题布局定稿，31,118 帧矩阵）
+- [protocol-raw/cam-expo-param.md](../protocol-raw/cam-expo-param.md)（41B 字段地图与受控实验）
+- [protocol-raw/cmd-map-android-csdk.md](../protocol-raw/cmd-map-android-csdk.md)（Android 订阅风暴与推送频率实证）

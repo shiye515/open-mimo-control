@@ -1,0 +1,41 @@
+# OpenMimoControl
+
+> DJI Osmo Action 4 远程控制协议的逆向工程成果与 iOS（Swift）实现。
+> 覆盖 BLE 配对、WiFi 入网、UDP 9004 控制通道（DUML 帧）、状态遥测订阅与实时预览，
+> 全部协议事实经 iOS 与 Android 官方 app 双源实测互证（4131 帧 CRC 全量校验）。
+> 面向要重新实现远程控制 app 的开发者。文档为中文。
+
+## Protocol Reference（协议实现指南，按实现顺序阅读）
+
+- [协议总览与连接时序](https://github.com/shiye515/open-mimo-control/blob/main/docs/protocol/README.md): 协议分层全景（BLE 配对 → WiFi 传输 → DUML 命令/遥测/预览）、连接总时序图、阅读路线与可信度约定
+- [发现与配对](https://github.com/shiye515/open-mimo-control/blob/main/docs/protocol/discovery-pairing.md): BLE 唤醒广播（WKP+MAC 反序）、FFF5 明文 DUML 8 帧序获取热点凭据（无 ECDH）、入网、设备信息响应（名字/MAC/SN/固件）
+- [传输层](https://github.com/shiye515/open-mimo-control/blob/main/docs/protocol/transport.md): UDP 9004 外层封装（iOS 34B / Android 20B 头、session 3B、大包 len 0x8000|u16）、TCP 7001 心跳与信令
+- [DUML 帧格式](https://github.com/shiye515/open-mimo-control/blob/main/docs/protocol/duml-frame.md): 逐字段定义（SOF/len/版本/crc8/src/dst/seq/cmdType/cmdSet/cmdId/payload/crc16）、CRC 参考实现、4 组已验证测试向量
+- [命令参考](https://github.com/shiye515/open-mimo-control/blob/main/docs/protocol/commands.md): 模式切换 02/E1、拍照 02/01、录像 02/02、快门 02/28（0x8000|分母+双粒度小数）、EV 02/2E、ISO 02/2A、白平衡 02/2C、FOV/变焦/倒计时/色彩/分辨率与 02/8E 参数 TLV 的 payload 编码与码表
+- [状态遥测](https://github.com/shiye515/open-mimo-control/blob/main/docs/protocol/telemetry.md): 00/99 主题订阅 payload 格式、21 个 key 清单与推送频率（OA4 周期性全量推送）、已实锤值结构（cam_status/cam_record_time/cam_expo_param 41B/cam_video_param_v2/cam_storage 等）
+- [保活与轮询](https://github.com/shiye515/open-mimo-control/blob/main/docs/protocol/keepalive-timing.md): iOS 0.2s 心跳三连/1s 编码器注册、Android 1s 节奏对照、最低保活集（statusPoll 必需、BLE 60s 保活是推流前提）、轮询与推送分工
+- [平台差异](https://github.com/shiye515/open-mimo-control/blob/main/docs/protocol/platform-notes.md): iOS/Android 官方 app 行为差异表（外层头 34B/20B、ACK 块、轮询节奏、TCP 7001）、复现优先级、已证伪清单
+
+## Tools
+
+- [逆向工具与方法论](https://github.com/shiye515/open-mimo-control/blob/main/docs/protocol/tools/REVERSE-METHODOLOGY.md): 无 root Android 抓包（SysDump TCP DUMP + OTP）、对照法设计、Ghidra headless 工具链、APK 逆向五步法、公开仓库隐私脱敏规范
+- [pcap_9004.py](https://github.com/shiye515/open-mimo-control/blob/main/docs/protocol/tools/pcap_9004.py): UDP 9004 会话解析器（纯 Python，session/timeline/burst/ascii 四模式）
+- [parse_mimo_capture.py](https://github.com/shiye515/open-mimo-control/blob/main/docs/protocol/tools/parse_mimo_capture.py): mimo pcap 解析与 CRC 复算（--crc-test）
+- [sysdump-otp.py](https://github.com/shiye515/open-mimo-control/blob/main/docs/protocol/tools/sysdump-otp.py): 三星 SysDump（*#9900#）TCP DUMP 的 OTP 计算器
+- [Ghidra 脚本](https://github.com/shiye515/open-mimo-control/tree/main/docs/protocol/tools/ghidra): 批量反编译导出 / cmd 常量映射 / key 名反向 xref / 立即数搜索
+
+## Samples
+
+- [样例帧 fixture](https://github.com/shiye515/open-mimo-control/tree/main/docs/protocol/samples): 真机抓取的 DUML 帧（录像开始/ACK、状态推送、心跳等，可作实现测试向量）
+
+## Optional（逆向过程档案，仅供溯源）
+
+- [protocol-raw/](https://github.com/shiye515/open-mimo-control/tree/main/docs/protocol-raw): 14 份过程文档——含推定、未定项与历史更正记录；实现依据以 Protocol Reference 为准
+- [cam_expo_param 字段地图](https://github.com/shiye515/open-mimo-control/blob/main/docs/protocol-raw/cam-expo-param.md): 41B 曝光状态流全字段受控实验记录（EV/ISO/快门/数字增益联动模型）
+- [cmd 路由实证](https://github.com/shiye515/open-mimo-control/blob/main/docs/protocol-raw/cmd-map-android-csdk.md): Android 官方 app 三轮抓包 cmd 实证、呈现误读的更正记录与交叉验证过程
+
+## Notes
+
+- 所有设备标识（MAC/序列号/热点密码/相机名后缀）已以 `**` 脱敏；抓包文件（.pcap，含真实流量）不入库
+- iOS 实现代码在 `ios/OpenMimoProtocol/`（Swift Package，含协议解析与渲染管线）与 `ios/OpenMimoControl/`（App 壳），测试 fixture 在 `ios/OpenMimoProtocol/Tests/`
+- 协议文档另有一份面向 LLM 的完整引用列表即本文件；过程细节需溯源时先读 Protocol Reference 各文档末尾的"证据"节
