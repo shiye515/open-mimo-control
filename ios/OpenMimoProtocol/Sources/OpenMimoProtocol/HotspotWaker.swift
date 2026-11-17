@@ -23,7 +23,7 @@ public final class HotspotWaker: NSObject, CBPeripheralManagerDelegate {
             manager = CBPeripheralManager(delegate: self, queue: nil)
         }
         status = "等待广播权限"
-        log("[wake] 等待 CBPeripheralManager 就绪（MAC 反序=\(macReversed.map { String(format: "%02x", $0) }.joined())）")
+        log("[wake] 等待 CBPeripheralManager 就绪（MAC 反序=\(macReversed.hexEncoded)）")
     }
 
     /// CBPeripheralManager 对外广播最多 28 字节 manufacturer data——超出会静默失败，
@@ -63,7 +63,7 @@ public final class HotspotWaker: NSObject, CBPeripheralManagerDelegate {
         let payloadB = Data([0x00, 0x00]) + payloadA
         let data = round % 2 == 0 ? payloadA : payloadB
         lastPayload = data
-        logSink?("[wake] 发起广播 round=\(round) payload=\([UInt8](data).map { String(format: "%02x", $0) }.joined())")
+        logSink?("[wake] 发起广播 round=\(round) payload=\([UInt8](data).hexEncoded)")
         manager?.startAdvertising([CBAdvertisementDataManufacturerDataKey: data])
         status = "广播唤醒中（第\(2 - round)轮）"
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in

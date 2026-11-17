@@ -2,6 +2,10 @@
 
 开源的 DJI Osmo Action 系列远程控制应用（iOS / SwiftUI），对标官方 DJI Mimo 的核心体验：蓝牙自动唤醒接入、H.265 低延迟实时预览、完整拍摄控制与素材浏览下载。
 
+<p align="center">
+  <img src="docs/screenshot.png" width="380" alt="OpenMimoControl 控制页截图">
+</p>
+
 > 本项目为个人互操作研究，与 DJI 无任何关联；仅用于控制用户自有的相机设备。
 
 ## 功能特性

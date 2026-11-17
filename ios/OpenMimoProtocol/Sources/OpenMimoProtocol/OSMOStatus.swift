@@ -370,9 +370,35 @@ public final class OSMOStatusTracker {
     }
 
     private func emit() {
+        // 内容变化检测（诊断）：lastUpdate 归一化后比对，区分「真变化」与「空转 emit」。
+        // 空转 emit 会让 UI 以 2Hz 全量重建同一内容——iOS 26 上代价显著，本日志用于量化。
+        var content = snapshot
+        content.lastUpdate = .distantPast
+        let changed = content != lastEmittedContent
+        lastEmittedContent = content
+        emitCount += 1
+        let now = DispatchTime.now()
+        if changed {
+            unchangedStreak = 0
+            if lastChangeLogAt == nil || now.uptimeNanoseconds - lastChangeLogAt!.uptimeNanoseconds > 2_000_000_000 {
+                lastChangeLogAt = now
+                onLog?("[status] 快照内容变化（emit #\(emitCount)）")
+            }
+        } else {
+            unchangedStreak += 1
+            if unchangedStreak % 10 == 0 {
+                onLog?("[status] 连续\(unchangedStreak)次 emit 内容无变化（2Hz 空转重建确认）")
+            }
+        }
         snapshot.lastUpdate = Date()
         onChanged?(snapshot)
     }
+
+    /// 诊断计数：上次 emit 的内容（lastUpdate 归一化）、连续无变化次数、变化日志限频
+    private var lastEmittedContent: OSMOStatusSnapshot?
+    private var emitCount = 0
+    private var unchangedStreak = 0
+    private var lastChangeLogAt: DispatchTime?
 
     private func setQueryError(_ key: String, _ result: UInt8) {
         if result == 0x00 { snapshot.queryErrors.removeValue(forKey: key) }
@@ -511,14 +537,14 @@ public final class OSMOStatusTracker {
         default:
             if !loggedUnknownTopics.contains(name) {
                 loggedUnknownTopics.insert(name)
-                onLog?("主题 \(name) 推送 \(data.count)B: \(data.map { String(format: "%02x", $0) }.joined().prefix(28))（未解析，首见记录）")
+                onLog?("主题 \(name) 推送 \(data.count)B: \(data.hexEncoded.prefix(28))（未解析，首见记录）")
             }
         }
     }
 
     /// 未确认布局主题：原始数据段记录到快照（值变化才更新；诊断面板展示，供抓包 diff）
     private func recordRawTopic(_ name: String, _ data: [UInt8]) {
-        let hex = data.map { String(format: "%02x", $0) }.joined()
+        let hex = data.hexEncoded
         guard snapshot.rawTopicSamples[name] != hex else { return }
         snapshot.rawTopicSamples[name] = hex
         onChanged?(snapshot)
@@ -709,7 +735,7 @@ public final class OSMOStatusTracker {
         let valLen = Int(p[5])
         if valLen > 0, p.count >= 6 + valLen, !knownParameterPids.contains(type) {
             // 仅语义未明确的 pid 记录原始回读（语义已实锤的进快照专属字段，不进未知区）
-            snapshot.rawParams[type] = p[6..<6+valLen].map { String(format: "%02x", $0) }.joined()
+            snapshot.rawParams[type] = p[6..<6+valLen].hexEncoded
         }
         if type == 0x000A, p.count >= 7 {
             if lastParam0A != p[6] {

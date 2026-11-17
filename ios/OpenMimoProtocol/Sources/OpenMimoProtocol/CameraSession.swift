@@ -301,7 +301,7 @@ public actor CameraSession {
             } else {
                 keyData = frame.payload
             }
-            let hex = keyData.map { String(format: "%02x", $0) }.joined()
+            let hex = keyData.hexEncoded
             let prev = UserDefaults.standard.string(forKey: "camera.video_key")
             if prev != hex {
                 UserDefaults.standard.set(hex, forKey: "camera.video_key")
@@ -422,7 +422,7 @@ public actor CameraSession {
         // 入站原始帧日志（前 20 个包全 hex——会话建立校准的关键观察点）
         inboundLogCount &+= 1
         if inboundLogCount <= 20 {
-            let hex = [UInt8](data).map { String(format: "%02x", $0) }.joined()
+            let hex = [UInt8](data).hexEncoded
             sessionLog("← RX[\(inboundLogCount)] [\(data.count)B]: \(String(hex.prefix(160)))")
         }
         // S2C 外层包头 = [len][session:3][seq:4]…（pcap 实证）：校验相机是否回显本端会话 id
@@ -430,10 +430,10 @@ public actor CameraSession {
             let s2c = [UInt8](data.prefix(4))
             let local = [UInt8](sessionID)
             if Array(s2c[1...3]) != local {
-                sessionLog("⚠ S2C session=\(s2c[1...3].map { String(format: "%02x", $0) }.joined()) " +
-                           "≠ 本地 \(local.map { String(format: "%02x", $0) }.joined())——相机使用了不同会话 id")
+                sessionLog("⚠ S2C session=\(s2c[1...3].hexEncoded) " +
+                           "≠ 本地 \(local.hexEncoded)——相机使用了不同会话 id")
             } else {
-                sessionLog("✓ S2C 回显本地 session=\(local.map { String(format: "%02x", $0) }.joined())")
+                sessionLog("✓ S2C 回显本地 session=\(local.hexEncoded)")
             }
         }
         var appReplyNeeded = false
@@ -475,7 +475,7 @@ public actor CameraSession {
         seq8Counter &+= 8
         let packet = MimoPacket(session: sessionID, seq8: seq8Counter, sequence: packetSeq, frames: [frame])
         let data = packet.encodedData()
-        let hex = [UInt8](data).map { String(format: "%02x", $0) }.joined()
+        let hex = [UInt8](data).hexEncoded
         sessionLog("→ TX \(label) [\(data.count)B]: \(String(hex.prefix(120)))")
         do {
             try await link.sendUDP(data)
@@ -720,7 +720,7 @@ public actor CameraSession {
         let packet = MimoPacket(session: sessionID, seq8: seq8Counter, sequence: packetSeq, frames: [frame])
         let data = packet.encodedData()
         if packetSeq <= 5 || packetSeq % 50 == 0 {
-            let hex = [UInt8](data).map { String(format: "%02x", $0) }.joined()
+            let hex = [UInt8](data).hexEncoded
             sessionLog("→ TX 包#\(packetSeq) [\(data.count)B]: \(hex)")
         }
         try await link.sendUDP(data)

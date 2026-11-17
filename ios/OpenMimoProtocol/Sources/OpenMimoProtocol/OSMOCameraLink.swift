@@ -60,7 +60,7 @@ public final class OSMOCameraLink {
     public var onVideo: ((Data) -> Void)?
     public var onMessage: ((UInt8, UInt8, UInt8, Data) -> Void)?
     public var onLog: ((String) -> Void)?
-    /// 相机状态快照变化（节流 ~0.5s 一次，datalink 线程）
+    /// 相机状态快照变化（内容门控 + ≤0.5s 节流，datalink 线程；内容不变不送达）
     public var onStatus: ((OSMOStatusSnapshot) -> Void)?
 
     /// 状态跟踪：解析 02/80、0D/02、02/DC、00/99 推送、00/76 事件与
@@ -69,6 +69,8 @@ public final class OSMOCameraLink {
     /// 事件回调（00/76 固件动作事件 event_id；失败事件由上层 toast）
     public var onEventFailure: ((String) -> Void)?
     private var lastStatusEmit: DispatchTime?
+    /// 内容门控：上次送达 UI 的快照内容（lastUpdate 归一化比对；P0 空转重建修复）
+    private var lastPassedContent: OSMOStatusSnapshot?
 
     // MARK: - Frame Assembler
 
@@ -209,9 +211,18 @@ public final class OSMOCameraLink {
         statusTracker.onChanged = { [weak self] snap in
             guard let self, !self.stopped else { return }
             let now = DispatchTime.now()
+            // 内容门控（P0，iOS 26 响应慢修复）：时间节流从「每 0.5s 必发」改为
+            // 「至多每 0.5s 一次，且内容真变化才发」。空转帧（内容不变）直接吞掉，
+            // 不再触发 UI 全量重建——真机实测空转 : 有效 ≈ 100:1（2026-11-16 日志）。
+            // lastUpdate 归一化后比对；窗口内到达的变化由后续帧在窗口开启时补发
+            //（DUML 帧流 ~60-75/s，送达延迟 ≤0.5s）。
+            var content = snap
+            content.lastUpdate = .distantPast
+            if let passed = self.lastPassedContent, content == passed { return }
             if let last = self.lastStatusEmit,
                now.uptimeNanoseconds - last.uptimeNanoseconds < 500_000_000 { return }
             self.lastStatusEmit = now
+            self.lastPassedContent = content
             self.onStatus?(snap)
         }
         statusTracker.onCaptureModeChanged = { [weak self] _ in
@@ -269,11 +280,23 @@ public final class OSMOCameraLink {
     /// 按.seq 匹配派发；超时由 ack 循环清扫。结果码语义见 OSMOCommandError。
     struct PendingRequest {
         let seq: UInt16
+        let cmdSet: UInt8
+        let cmdId: UInt8
         let sentAt: DispatchTime
         let timeoutNs: UInt64
         let completion: (Result<Data, OSMOCommandError>) -> Void
     }
     private var pendingRequests: [PendingRequest] = []
+
+    // MARK: 网络诊断统计（iOS 26 响应慢排查）：应答 RTT 分布 / 超时 / 重发 / 回读波次
+    private var replyCount = 0
+    private var replySumMs = 0
+    private var replyMaxMs = 0
+    private var timeoutCount = 0
+    private var netStatsStart: DispatchTime?
+    private var lastTimeoutLogAt: DispatchTime?
+    private var lastResendLogAt: DispatchTime?
+    private var lastQueryWaveLogAt: DispatchTime?
 
     /// 发送控制命令并等待应答（完成回调在 datalink queue）。UI 层经 OSMOControl
     /// actor 串行化——同一时刻至多一条在途（specs「控制命令应答与错误统一」）。
@@ -287,7 +310,7 @@ public final class OSMOCameraLink {
         let msg = encodeDUML(sender: addrApp, receiver: recv, seq: seq,
                              flags: 0x40, cmdSet: cmdSet, cmdId: cmdId, payload: payload)
         lock.lock()
-        pendingRequests.append(PendingRequest(seq: seq, sentAt: .now(),
+        pendingRequests.append(PendingRequest(seq: seq, cmdSet: cmdSet, cmdId: cmdId, sentAt: .now(),
                                               timeoutNs: UInt64(timeout * 1e9), completion: completion))
         if pendingRequests.count > 8 {   // 队列上限兜底：全超时处理，不让 UI 悬挂
             let stale = pendingRequests.removeFirst()
@@ -317,6 +340,11 @@ public final class OSMOCameraLink {
         }
         let req = pendingRequests.remove(at: idx)
         lock.unlock()
+        // RTT 统计（诊断）：应答到达时刻 - 请求发出时刻；5s 窗口汇总见 ack 循环
+        let rttMs = Int((DispatchTime.now().uptimeNanoseconds - req.sentAt.uptimeNanoseconds) / 1_000_000)
+        replyCount += 1
+        replySumMs += rttMs
+        replyMaxMs = max(replyMaxMs, rttMs)
         let code = payload.first ?? 0xFF
         if code == 0x00 { req.completion(.success(payload)) }
         else { req.completion(.failure(.result(code))) }
@@ -335,7 +363,35 @@ public final class OSMOCameraLink {
             return false
         }
         lock.unlock()
+        guard !expired.isEmpty else { return }
+        timeoutCount += expired.count
+        // 超时是链路劣化的直接证据（诊断）：限频 5s 一条，累计数进 5s 统计行
+        let logNow = DispatchTime.now()
+        if lastTimeoutLogAt == nil || logNow.uptimeNanoseconds - lastTimeoutLogAt!.uptimeNanoseconds > 5_000_000_000 {
+            lastTimeoutLogAt = logNow
+            let names = expired.map { String(format: "%02X/%02X", $0.cmdSet, $0.cmdId) }.joined(separator: ",")
+            log("[net] ⏱ 命令超时 \(names)（累计 \(timeoutCount) 次）")
+        }
         for req in expired { req.completion(.failure(.timeout)) }
+    }
+
+    /// ack 循环内调用：每 5s 汇总一次应答 RTT / 超时统计（诊断；无流量时不打日志）
+    private func maybeEmitNetStats() {
+        let now = DispatchTime.now()
+        guard let start = netStatsStart else {
+            netStatsStart = now
+            return
+        }
+        guard now.uptimeNanoseconds - start.uptimeNanoseconds >= 5_000_000_000 else { return }
+        netStatsStart = now
+        if replyCount > 0 || timeoutCount > 0 {
+            let avg = replyCount > 0 ? replySumMs / replyCount : 0
+            log("[net] 5s统计: 应答\(replyCount)条 avg=\(avg)ms max=\(replyMaxMs)ms 超时=\(timeoutCount)")
+        }
+        replyCount = 0
+        replySumMs = 0
+        replyMaxMs = 0
+        timeoutCount = 0
     }
 
     // MARK: - TCP Poke
@@ -451,7 +507,7 @@ public final class OSMOCameraLink {
 
     private func handleTcpDUML(sender: UInt8, receiver: UInt8, flags: UInt8,
                                cmdSet: UInt8, cmdId: UInt8, payload: Data) {
-        let p = payload.map { String(format: "%02x", $0) }.joined().prefix(32)
+        let p = payload.hexEncoded.prefix(32)
         log("[osmo] TCP DUML \(String(format: "%02x", cmdSet))/\(String(format: "%02x", cmdId)) flags=\(String(format: "%02x", flags)) from=\(String(format: "%02x", sender)) pl=\(p)")
         if cmdSet == 0x07 && cmdId == 0x45 && flags & 0x80 != 0 && payload.count >= 2 {
             switch payload[1] {
@@ -536,7 +592,7 @@ public final class OSMOCameraLink {
         }
         let pkt = makeLinkPacket(type: 0, seq: linkSeq, body: body)
         if attempt == 1 && flowRound == 0 {
-            log("[osmo] 握手首包 hex: \(pkt.map { String(format: "%02x", $0) }.joined())")
+            log("[osmo] 握手首包 hex: \(pkt.hexEncoded)")
         }
         connection?.send(content: pkt, completion: .contentProcessed { _ in })
         linkSeq = (linkSeq &+ seqStep) & 0xFFFF
@@ -697,6 +753,13 @@ public final class OSMOCameraLink {
             queries.insert((0x02, 0x13, Data()), at: 0)   // 照片格式（仅照片模式；视频格式由 cam_video_param_v2 推送驱动）
         }
         // 02/2B 已退役：isoCode 由 cam_expo_param @7 门控 + @16-17 反查（parseExpoParam）
+        // 诊断：回读波次边界（限频 10s；3s 轮询与设置后 0.5s 校准共用此入口）
+        let waveNow = DispatchTime.now()
+        if lastQueryWaveLogAt == nil || waveNow.uptimeNanoseconds - lastQueryWaveLogAt!.uptimeNanoseconds > 10_000_000_000 {
+            lastQueryWaveLogAt = waveNow
+            let modeName = OSMOA4.modeNames.first { $0.code == mode }?.name ?? "\(mode)"
+            log("[net] 回读波次 \(queries.count) 条（模式 \(modeName)）")
+        }
         for (i, q) in queries.enumerated() {
             queue.asyncAfter(deadline: .now() + Double(i) * 0.3) { [weak self] in
                 guard let self, !self.stopped else { return }
@@ -724,6 +787,7 @@ public final class OSMOCameraLink {
             self?.sendAck()
             self?.resendUnacked()
             self?.sweepRequestTimeouts()
+            self?.maybeEmitNetStats()
         }
         timer.resume()
         ackTimer = timer
@@ -791,6 +855,11 @@ public final class OSMOCameraLink {
         guard !unacked.isEmpty, acksSeen else { return }
         let now = DispatchTime.now()
         guard now.uptimeNanoseconds - unacked[0].sent.uptimeNanoseconds > 300_000_000 else { return }
+        // 诊断：300ms 无 ack 触发整批重发——持续出现说明上行丢包或相机应答停滞（限频 5s）
+        if lastResendLogAt == nil || now.uptimeNanoseconds - lastResendLogAt!.uptimeNanoseconds > 5_000_000_000 {
+            lastResendLogAt = now
+            log("[net] ↻ 重发 \(unacked.count) 包（300ms 无 ack）")
+        }
         for i in unacked.indices {
             connection?.send(content: unacked[i].packet, completion: .contentProcessed { _ in })
             unacked[i].sent = now
@@ -829,7 +898,7 @@ public final class OSMOCameraLink {
             }
             if data.count < 8 {
                 if !self.isReady {
-                    self.log("[osmo] 收到短包 \(data.count)B: \(data.map { String(format: "%02x", $0) }.joined().prefix(40))")
+                    self.log("[osmo] 收到短包 \(data.count)B: \(data.hexEncoded.prefix(40))")
                 }
                 self.receiveNext(); return
             }

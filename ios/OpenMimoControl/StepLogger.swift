@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import OpenMimoProtocol
 
 /// 连接流程步骤日志（tasks 4.3b）：每步指令固定格式
 /// `时间戳 | 步骤名 | 目的 | 内容`，复用 AppDiagnostics 面板与复制通道。
@@ -20,9 +21,8 @@ final class StepLogger: ObservableObject {
 
     /// 记录一条步骤日志。direction: "→" 发送 / "←" 接收 / "·" 状态
     func log(step: String, purpose: String, direction: String = "·", content: String) {
-        let fmt = DateFormatter()
-        fmt.dateFormat = "HH:mm:ss.SSS"
-        let entry = Entry(time: fmt.string(from: Date()),
+        // 复用共享 formatter：DateFormatter 构造开销大，每条日志新建是热路径浪费
+        let entry = Entry(time: AppDiagnostics.timestampFormatter.string(from: Date()),
                           step: step,
                           purpose: "\(direction) \(purpose)",
                           content: content)
@@ -33,7 +33,7 @@ final class StepLogger: ObservableObject {
 
     /// 记录指令帧（发送/接收均适用），内容为 hex
     func logFrame(step: String, direction: String, frame: Data, purpose: String) {
-        let hex = [UInt8](frame).map { String(format: "%02x", $0) }.joined()
+        let hex = [UInt8](frame).hexEncoded
         log(step: step, purpose: purpose, direction: direction, content: "\(frame.count)B \(hex)")
     }
 

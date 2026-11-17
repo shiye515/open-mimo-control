@@ -142,6 +142,129 @@ final class PermissionStatus: ObservableObject {
     }
 }
 
+// MARK: - 诊断日志视图
+
+/// 等宽逐行诊断日志（连接页步骤日志区 / 控制页详情弹窗共用）。
+/// 此前两处内联渲染（字号/颜色略有分叉），统一从这里出。
+struct DiagnosticsLogView: View {
+    let lines: [String]
+    var font: Font = .system(size: 9.5, design: .monospaced)
+    var textColor: Color = OC.textTertiary
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                Text(line)
+                    .font(font)
+                    .foregroundStyle(textColor)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+}
+
+// MARK: - 共享格式化工具
+
+/// 全 App 共享的格式化工具（勿在页面内重复实现）
+enum OCFormat {
+    /// 秒 → 时长文本：<1h 为 mm:ss（分不截断），≥1h 为 h:mm:ss。
+    /// 录制角标 / 相机详情 / 媒体文件时长共用（此前三处实现且小时行为不一致）。
+    static func duration(_ seconds: Int64) -> String {
+        let s = max(0, seconds)
+        if s >= 3600 {
+            return String(format: "%d:%02d:%02d", s / 3600, s % 3600 / 60, s % 60)
+        }
+        return String(format: "%02d:%02d", s / 60, s % 60)
+    }
+}
+
+// MARK: - 弹窗内选项行统一样式
+
+/// 弹窗内的选项行（选项列表弹窗 / 录制模式弹窗共用）：44pt 圆角行，
+/// 选中态 = accent 文本加粗 + 右侧对勾 + accent 底色（与控制区胶囊 44pt 同高）。
+/// icon：模式瓦片等带引导图标的场景可选传入。
+struct OCOptionRow: View {
+    let title: String
+    let isSelected: Bool
+    var icon: String? = nil
+    /// 弱化态（如「直播（未实现）」）：textTertiary 文本 + 半透明底，仍可点击
+    var muted: Bool = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if let icon {
+                Image(systemName: icon)
+                    .font(.system(size: 15))
+                    .foregroundStyle(isSelected && !muted ? OC.accent
+                                     : (muted ? OC.textTertiary : OC.textSecondary))
+            }
+            Text(title)
+                .font(.system(size: 15, weight: isSelected && !muted ? .semibold : .regular))
+                .foregroundStyle(muted ? OC.textTertiary
+                                 : (isSelected ? OC.accent : OC.textPrimary))
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+            Spacer(minLength: 0)
+            if isSelected && !muted {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(OC.accent)
+            }
+        }
+        .padding(.horizontal, 14)
+        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 44)
+        // 行底色用白色半透明叠加：sheet 玻璃底与 OC.pill 色值太近，固定色缺乏对比；
+        // 叠加色随底自适应。选中底色相应加深以保持选中/未选中的区分。
+        .background(RoundedRectangle(cornerRadius: 10)
+            .fill(isSelected && !muted ? OC.accent.opacity(0.20)
+                  : (muted ? Color.white.opacity(0.07) : Color.white.opacity(0.13))))
+        .contentShape(RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+// MARK: - 底部选择弹窗统一容器
+
+/// 底部选择弹窗统一尺寸（OCSelectionSheet 是泛型类型，static 存储属性须放独立枚举）
+enum OCSelectionSheetMetrics {
+    /// 标题栏行高
+    static let titleRowHeight: CGFloat = 32
+    /// 统一总高：12 头部留白 + 32 标题栏 + 8 间距 + (5×44 选项行 + 4×8 行距) + 8 底部留白
+    static let height: CGFloat = 12 + titleRowHeight + 8 + (5 * 44 + 4 * 8) + 8   // = 312
+    /// 内容区高度（总高 − 头部），滚轮等填充型内容按此取高
+    static let contentHeight: CGFloat = height - 12 - titleRowHeight - 8 - 8      // = 252
+}
+
+/// 所有控制项底部弹窗的统一外壳：标题栏 + 内容区顶部对齐，高度统一为恰好容纳
+/// 5 行 44pt 选项行。选项列表、滚轮、模式网格共用，保证弹窗观感一致。
+///
+/// HIG sheets 要点（developer.apple.com/design/human-interface-guidelines/sheets）：
+/// - 无 Cancel/Done 按钮：本类弹窗选择即时生效、无待存状态，不构成「取消/完成」语义；
+///   HIG 明确「人们期望下滑手势关闭 sheet，而不是点关闭按钮」。
+/// - 不显示 grabber：grabber 用于「可调整高度的 sheet」（点击换档/拖拽改高）；本弹窗
+///   单一固定 detent 不可调整，显示 grabber 会误导。关闭靠下滑手势。
+struct OCSelectionSheet<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.system(size: 17, weight: .bold))
+                .foregroundStyle(OC.textPrimary)
+                .frame(minHeight: OCSelectionSheetMetrics.titleRowHeight)   // 标题栏行高
+            content()
+            Spacer(minLength: 0)   // 选项不足一屏时内容顶部对齐（sheet 默认垂直居中）
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 12)
+        .padding(.bottom, 8)
+        .frame(maxWidth: .infinity)
+        // 不叠 OC.card：直接用系统 sheet 的半透明玻璃底（iOS 26），避免双层背景
+        .presentationDetents([.height(OCSelectionSheetMetrics.height)])
+        .presentationDragIndicator(.hidden)   // 固定 detent 不可调整——grabber 仅用于可调高度 sheet
+    }
+}
+
 /// 诊断面板右上角的悬浮复制按钮：复制内容与面板所见完全一致。
 struct CopyDiagnosticsButton: View {
     let snapshotProvider: () -> String
@@ -159,11 +282,10 @@ struct CopyDiagnosticsButton: View {
             Image(systemName: copied ? "checkmark.circle.fill" : "doc.on.doc")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(OC.accent)
-                .padding(6)
+                .frame(width: 44, height: 44)   // 可点击按钮统一 44pt（控制区胶囊同高）
                 .background(Circle().fill(OC.pill))
         }
         .buttonStyle(.plain)
-        .padding(4)
         .accessibilityLabel("复制诊断信息")
     }
 }
@@ -179,7 +301,7 @@ struct RecBadge: View {
                 .fill(OC.recRed)
                 .frame(width: 7, height: 7)
                 .opacity(blinkOn ? 1 : 0.25)
-            Text(String(format: "REC %02d:%02d", seconds / 60, seconds % 60))
+            Text("REC \(OCFormat.duration(seconds))")
                 .font(.system(size: 11, weight: .medium).monospacedDigit())
                 .foregroundStyle(.white)
         }

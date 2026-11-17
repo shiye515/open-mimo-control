@@ -44,12 +44,37 @@ final class AppDiagnostics: ObservableObject {
     /// 落盘专用串行队列：并发全局队列上多把 FileHandle 同时 seekToEnd/write 会交错截断
     /// （真机日志出现半行碎片、256KB 重建后写入停滞），必须串行化
     private static let logQueue = DispatchQueue(label: "diag.log.append", qos: .utility)
-    /// 时间戳格式化器（DateFormatter 构造开销大，逐行创建是热路径浪费；HH:mm:ss.SSS 固定格式）
-    private static let timestampFormatter: DateFormatter = {
+    /// 时间戳格式化器（DateFormatter 构造开销大，逐行创建是热路径浪费；HH:mm:ss.SSS 固定格式）。
+    /// 非 private：StepLogger 等同格式场景直接复用，勿在日志路径逐条 new。
+    static let timestampFormatter: DateFormatter = {
         let fmt = DateFormatter()
         fmt.dateFormat = "HH:mm:ss.SSS"
         return fmt
     }()
+
+    // MARK: 主线程健康探针（iOS 26 响应慢排查）
+
+    /// 主线程心跳定时器（跑在主 RunLoop）：实际触发间隔超出预期 200ms 即判定主线程被占
+    /// （SwiftUI 重建 / 系统动画 / 网络回调风暴）。限频 5s 一条，避免卡顿时刷屏。
+    private var probeTimer: Timer?
+    private var probeLastFire = Date()
+    private var probeLastLogAt = Date.distantPast
+
+    func startMainThreadProbe() {
+        guard probeTimer == nil else { return }
+        probeLastFire = Date()
+        probeTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            let firedAt = Date()   // 主 RunLoop 实际触发时刻（主线程阻塞时此处已迟到）
+            Task { @MainActor in
+                guard let self else { return }
+                let driftMs = firedAt.timeIntervalSince(self.probeLastFire) * 1000 - 500
+                self.probeLastFire = firedAt
+                guard driftMs > 200, firedAt.timeIntervalSince(self.probeLastLogAt) > 5 else { return }
+                self.probeLastLogAt = firedAt
+                self.add("[main] 主线程卡顿 ~\(Int(driftMs))ms（0.5s 探针漂移）")
+            }
+        }
+    }
 
     /// 追加写沙盒文件（串行队列；超 256KB 环形重建——保留尾部 3/4，最近的测试事件
     /// 不因爆量整体丢失）。devicectl 可直接拉取。

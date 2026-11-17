@@ -12,12 +12,9 @@ struct ControlScreenView: View {
 
     @ObservedObject private var diagnostics = AppDiagnostics.shared
     @ObservedObject private var stepLogger = StepLogger.shared
-    @State private var showDetail = false
-    @State private var showModeSheet = false
     /// 数码变焦（02/B8 方向+时间：捏合按住连续变焦，松手停止；轮盘/双击发绝对位置）
     @State private var zoomLevel: Double = 1.0
     @State private var zoomBase: Double = 1.0
-    @State private var showZoomSlider = false
     @State private var lastMoveAt: Date = .distantPast
     @State private var lastZoomSentAt: Date = .distantPast
     @State private var toast: String?
@@ -45,8 +42,6 @@ struct ControlScreenView: View {
     /// EV 滚动中的本地草稿（显示优先于回读；关闭滚轮后交还回读）
     @State private var evDraft: UInt8?
     @State private var lastEVSentAt: Date = .distantPast
-    /// EV 滚轮弹窗（长按 EV 控制项触发）
-    @State private var showEVDial = false
 
     /// Picker 选中项绑定：滚动跨档即震动 + 音效 + 节流下发
     private var evPickerBinding: Binding<UInt8> {
@@ -79,11 +74,38 @@ struct ControlScreenView: View {
         return Array(UInt16((range.lowerBound * 10).rounded())...UInt16((range.upperBound * 10).rounded()))
     }
 
-    /// 通用滚轮弹窗上下文（选项 ≥5 的控制项点击弹出）
-    @State private var wheelSheetCtx: WheelSheetContext?
+    /// 当前弹出的控制项弹窗（唯一 sheet 承载全部弹窗）
+    @State private var activeSheet: ControlSheetRoute?
+    /// 最近呈现的弹窗路由（onDismiss 时区分 EV/变焦的收尾动作）
+    @State private var lastRoute: ControlSheetRoute?
+    /// 最近一次弹窗关闭完成时刻（快速连点保护用）
+    @State private var lastSheetDismissAt = Date.distantPast
+    /// 快速连点时的延迟呈现任务（后点的路由胜出）
+    @State private var delayedPresentTask: Task<Void, Never>?
 
-    /// 长档位控制项：选项 ≥6 时点击弹出滚轮弹窗，其余保持 Menu 交互不变；
-    /// live=false 的格式类滚轮仅在关闭时下发（命令会重启编码器）
+    /// 弹窗呈现统一入口（所有触发点经此）：单飞 + dismissal 动画窗口避让。
+    /// 上一轮 sheet 的 dismissal 动画未结束时立刻呈现新弹窗会丢失自定义 detent
+    /// ——iOS 已知问题：弹窗直接按全屏高度呈现。距上次关闭 <0.45s 时延迟呈现，
+    /// 后点的路由胜出（先取消未执行的延迟任务）。
+    private func presentSheet(_ route: ControlSheetRoute) {
+        guard activeSheet == nil else { return }   // 已在呈现/呈现动画中：忽略本次点击
+        let elapsed = Date().timeIntervalSince(lastSheetDismissAt)
+        if elapsed < 0.45 {
+            delayedPresentTask?.cancel()
+            delayedPresentTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: UInt64((0.45 - elapsed) * 1_000_000_000))
+                guard !Task.isCancelled else { return }
+                activeSheet = route
+            }
+        } else {
+            activeSheet = route
+        }
+    }
+
+    /// 长档位控制项：选项 ≤10 时点击弹出选项列表（>5 档双列布局），>10 弹滚轮
+    /// （系统 wheel 行高固定 ~32pt，档位多时仍最紧凑——EV 19 档/快门/白平衡/延时间隔/变焦）；
+    /// live 参数仅对滚轮生效：live=false 的格式类滚轮仅在关闭时下发（命令会重启编码器），
+    /// 选项列表本身即单选直发，无需该区分。
     @ViewBuilder
     private func pillWheelRow(_ title: String, current: String?, options: [String],
                               initialIndex: Int? = nil,
@@ -91,43 +113,20 @@ struct ControlScreenView: View {
                               live: Bool = true, rowWidth: CGFloat = 60,
                               onPick: @escaping (Int) -> Void,
                               onClose: (() -> Void)? = nil) -> some View {
-        if options.count < 6 {
+        if options.count <= 10 {
             pillRow(title, current: current, options: options, disabled: disabled) { i in
                 onPick(i)
                 await MainActor.run { flow.refreshOSMOQueries() }
             }
         } else {
-            let idx = initialIndex ?? (options.firstIndex(of: current ?? "") ?? 0)
-            HStack(spacing: 6) {
-            Text(title)
-                .font(.system(size: 13))
-                .foregroundStyle(OC.textSecondary)
-                .lineLimit(1)
-            Spacer(minLength: 4)
-            HStack(spacing: 3) {
-                Text(current ?? "—")
-                    .font(.system(size: 13, weight: .medium).monospacedDigit())
-                    .foregroundStyle(disabled ? OC.textTertiary : OC.textPrimary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.75)
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 9))
-                    .foregroundStyle(OC.textSecondary)
+            PillRowView(title: title, current: current, disabled: disabled, showChevron: true) {
+                guard !disabled else { return }   // 禁用态点击无反应（.disabled 不拦截后挂手势）
+                AppDiagnostics.shared.add("[ui] tap [\(title)]（请求滚轮sheet，\(options.count) 档）")
+                let idx = initialIndex ?? (options.firstIndex(of: current ?? "") ?? 0)
+                presentSheet(.wheel(WheelSheetContext(title: title, options: options,
+                                                      initialIndex: idx, live: live, rowWidth: rowWidth,
+                                                      onPick: onPick, onClose: onClose)))
             }
-        }
-        .padding(.horizontal, 11)
-        .padding(.vertical, 6)
-        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 44)
-        .background(RoundedRectangle(cornerRadius: 8).fill(OC.pill))
-        .contentShape(RoundedRectangle(cornerRadius: 8))
-        .disabled(disabled)
-        .opacity(disabled ? 0.45 : 1)
-        .onTapGesture {
-            guard !disabled else { return }   // 禁用态点击无反应（.disabled 不拦截后挂手势）
-            wheelSheetCtx = WheelSheetContext(title: title, options: options,
-                                              initialIndex: idx, live: live, rowWidth: rowWidth,
-                                              onPick: onPick, onClose: onClose)
-        }
         }
     }
 
@@ -184,13 +183,9 @@ struct ControlScreenView: View {
         }
     }
 
-    /// EV 滚轮弹窗（底部弹出，系统 wheel 选择器 + 逐档震动/音效；下滑关闭）
+    /// EV 滚轮弹窗（底部弹出，系统 wheel 选择器 + 逐档震动/音效；下滑关闭；统一容器）
     private var evDialSheet: some View {
-        VStack(spacing: 8) {
-            Text("EV")
-                .font(.system(size: 17, weight: .bold))
-                .foregroundStyle(OC.textPrimary)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        OCSelectionSheet(title: "EV") {
             Picker("EV", selection: evPickerBinding) {
                 ForEach(OSMOA4.evSteps, id: \.self) { code in
                     Text(OSMOA4.evName(code))
@@ -200,43 +195,20 @@ struct ControlScreenView: View {
                 }
             }
             .pickerStyle(.wheel)
-            .frame(height: 170)
+            .frame(height: OCSelectionSheetMetrics.contentHeight)
             .padding(.horizontal, -8)   // wheel 自带左右内边距，向外借齐弹窗边
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 12)
-        .padding(.bottom, 8)
-        .background(OC.card, ignoresSafeAreaEdges: .bottom)
-        .presentationDetents([.height(220)])
-        .presentationDragIndicator(.hidden)
+        .onAppear { AppDiagnostics.shared.add("[ui] EV滚轮sheet已呈现") }
     }
 
     /// EV 控制项：点击弹出底部滚轮弹窗（19 档超出系统 Menu 可选范围）
-    @ViewBuilder
     private var evPill: some View {
-        HStack(spacing: 6) {
-            Text("EV")
-                .font(.system(size: 13))
-                .foregroundStyle(OC.textSecondary)
-                .lineLimit(1)
-            Spacer(minLength: 4)
-            HStack(spacing: 3) {
-                Text((evDraft ?? st.expoCompValue).map { OSMOA4.evName($0) } ?? "—")
-                    .font(.system(size: 13, weight: .medium).monospacedDigit())
-                    .foregroundStyle(OC.textPrimary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.75)
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 9))
-                    .foregroundStyle(OC.textSecondary)
-            }
+        PillRowView(title: "EV",
+                    current: (evDraft ?? st.expoCompValue).map { OSMOA4.evName($0) },
+                    disabled: false, showChevron: true) {
+            AppDiagnostics.shared.add("[ui] tap EV（请求滚轮sheet，\(OSMOA4.evSteps.count) 档）")
+            presentSheet(.evWheel)
         }
-        .padding(.horizontal, 11)
-        .padding(.vertical, 6)
-        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 44)
-        .background(RoundedRectangle(cornerRadius: 8).fill(OC.pill))
-        .contentShape(RoundedRectangle(cornerRadius: 8))
-        .onTapGesture { showEVDial = true }
     }
     @State private var liveNotice: String?
     @State private var recBlinkInited = false
@@ -267,12 +239,32 @@ struct ControlScreenView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(OC.bg.ignoresSafeArea())
         .safeAreaInset(edge: .bottom) { bottomBar }
-        .sheet(item: $wheelSheetCtx) { ctx in WheelSheetView(ctx: ctx) }
-        .sheet(isPresented: $showEVDial, onDismiss: { evClose() }) { evDialSheet }
+        // 全部弹窗经唯一 sheet 承载（ControlSheetRoute）：多个 .sheet 修饰符在快速连点时
+        // 会互相竞争 presentation 状态，detent 丢失导致弹窗占满整屏。
+        // EV/变焦滚轮关闭时的收尾（终档直发 + 回读校准 + 清草稿）按最近路由区分执行。
+        .sheet(item: $activeSheet, onDismiss: {
+            lastSheetDismissAt = Date()
+            switch lastRoute {
+            case .evWheel: evClose()
+            case .zoomWheel: zoomClose()
+            default: break
+            }
+            lastRoute = nil
+        }) { route in
+            switch route {
+            case .wheel(let ctx): AnyView(WheelSheetView(ctx: ctx))
+            case .options(let ctx): AnyView(OptionSheetView(ctx: ctx))
+            case .evWheel: AnyView(evDialSheet)
+            case .zoomWheel: AnyView(zoomSliderSheet)
+            case .detail: AnyView(DetailSheetView(flow: flow, diagnostics: diagnostics,
+                                                  onDisconnect: onDisconnect))
+            case .mode: AnyView(ModeSheetView(liveNotice: $liveNotice, flow: flow))
+            }
+        }
+        .onChange(of: activeSheet) { sheet in
+            if sheet != nil { lastRoute = sheet }
+        }
         .ocToast($toast)
-        .sheet(isPresented: $showDetail) { detailSheet }
-        .sheet(isPresented: $showModeSheet) { modeSheet }
-        .sheet(isPresented: $showZoomSlider, onDismiss: { zoomClose() }) { zoomSliderSheet }
         .onChange(of: flow.osmoStatus.captureMode) { _ in
             // 模式切换后变焦量程变化（视频 1x–2x），钳制当前值
             if let range = zoomRange, zoomLevel > range.upperBound { zoomLevel = range.upperBound }
@@ -283,13 +275,19 @@ struct ControlScreenView: View {
             toast = nil
             DispatchQueue.main.async { toast = err }
         }
+        .onAppear {
+            AppDiagnostics.shared.add("[ui] 控制页出现（body 重建起点）")
+        }
     }
 
     // MARK: 顶部状态两行（第一行 电量·温度 / SD；第二行 分辨率帧率 / FOV / 曝光概要；
     // 不展示录制时长与录制模式 —— 录制时长在预览左上角 REC 角标）。点击展开相机状态详情。
 
     private var topStatus: some View {
-        Button { showDetail = true } label: {
+        Button {
+            AppDiagnostics.shared.add("[ui] tap 状态详情（请求 sheet）")
+            presentSheet(.detail)
+        } label: {
             VStack(spacing: 5) {
                 HStack(spacing: 10) {
                     Spacer()
@@ -309,6 +307,7 @@ struct ControlScreenView: View {
             .padding(.horizontal, 14)
             .padding(.top, 8)
             .padding(.bottom, 6)
+            .frame(minHeight: 44)   // 可点击高度统一（控制区胶囊同高）
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -437,42 +436,19 @@ struct ControlScreenView: View {
     }
 
     /// 变焦入口行（仅拍照/视频模式；点击弹出轮盘）
-    private func zoomEntryButton(_ range: ClosedRange<Double>) -> some View {
-        Button {
+    private func zoomEntryButton() -> some View {
+        PillRowView(title: "变焦", current: String(format: "%.1fx", displayZoom),
+                    disabled: false, showChevron: true) {
+            AppDiagnostics.shared.add("[ui] tap 变焦（请求滚轮sheet，\(zoomDialCodes.count) 档）")
             zoomLevel = displayZoom   // 弹出时以相机实际倍率为轮盘基准
-            showZoomSlider = true
-        } label: {
-                HStack(spacing: 6) {
-                    Text("变焦")
-                        .font(.system(size: 13))
-                        .foregroundStyle(OC.textSecondary)
-                    Spacer(minLength: 4)
-                    HStack(spacing: 4) {
-                        Text(String(format: "%.1fx", displayZoom))
-                            .font(.system(size: 13, weight: .medium).monospacedDigit())
-                            .foregroundStyle(OC.textPrimary)
-                        Image(systemName: "chevron.up.chevron.down")
-                            .font(.system(size: 9))
-                            .foregroundStyle(OC.textSecondary)
-                    }
-                }
-                .padding(.horizontal, 11)
-                .padding(.vertical, 6)
-                .frame(minWidth: 0, maxWidth: .infinity, minHeight: 44)
-            .background(RoundedRectangle(cornerRadius: 8).fill(OC.pill))
-            .contentShape(RoundedRectangle(cornerRadius: 8))
+            presentSheet(.zoomWheel)
         }
-        .buttonStyle(.plain)
     }
 
     /// 变焦轮盘弹窗（0.1x 刻度 + 整数焦段磁吸；拍照 1.0–4.0 / 视频 1.0–2.0）
-    /// 变焦滚轮弹窗（底部弹出，系统 wheel + 逐档震动/音效；量程按模式：拍照 1.0–4.0 / 视频 1.0–2.0；下滑关闭）
+    /// 变焦滚轮弹窗（底部弹出，系统 wheel + 逐档震动/音效；量程按模式：拍照 1.0–4.0 / 视频 1.0–2.0；下滑关闭；统一容器）
     private var zoomSliderSheet: some View {
-        VStack(spacing: 8) {
-            Text("变焦")
-                .font(.system(size: 17, weight: .bold))
-                .foregroundStyle(OC.textPrimary)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        OCSelectionSheet(title: "变焦") {
             Picker("变焦", selection: zoomPickerBinding) {
                 ForEach(zoomDialCodes, id: \.self) { code in
                     Text(String(format: "%.1fx", Double(code) / 10))
@@ -482,15 +458,10 @@ struct ControlScreenView: View {
                 }
             }
             .pickerStyle(.wheel)
-            .frame(height: 170)
+            .frame(height: OCSelectionSheetMetrics.contentHeight)
             .padding(.horizontal, -8)
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 12)
-        .padding(.bottom, 8)
-        .background(OC.card, ignoresSafeAreaEdges: .bottom)
-        .presentationDetents([.height(220)])
-        .presentationDragIndicator(.hidden)
+        .onAppear { AppDiagnostics.shared.add("[ui] 变焦滚轮sheet已呈现") }
     }
 
     private func setZoom(_ level: Double) {
@@ -548,47 +519,38 @@ struct ControlScreenView: View {
                   spacing: 10) { pills() }   // 行距与列距一致
     }
 
-    /// 参数胶囊：Menu 选择器 + 回读值（specs「拍摄参数设置」：显示值来自回读，成功后 refresh 校准）。
-    /// 整块胶囊都是 Menu label（触摸热区 = 整个 pill，≥44pt），点标题区与值区同样弹出选项
+    /// 参数胶囊：点击弹自绘选项弹窗 + 回读值（specs「拍摄参数设置」：显示值来自回读，成功后 refresh 校准）。
+    /// 两选项直切不弹层；当前值未知（回读未到）时仍弹选项列表。
+    /// 胶囊布局在 PillRowView——本方法只保留行为。勿把 ViewBuilder 布局内联回此处：
+    /// 素材页返回整面板重建时在协程线程（512KB 栈）评估 body，巨型内联类型会撑爆栈
+    /// （2026-11-10 videoPills.getter、2026-11-17 paramsPanel.getter 两次 ___chkstk 崩溃同根因）。
     private func pillRow(_ title: String, current: String?, options: [String],
                          disabled: Bool = false,
                          action: @escaping (Int) async -> Void) -> some View {
-        Menu {
-            ForEach(options.indices, id: \.self) { i in
-                Button(options[i]) { Task { await action(i) } }
+        let isToggle = options.count == 2
+        return PillRowView(title: title, current: current,
+                           disabled: disabled || flow.osmoBusy,
+                           showChevron: !isToggle) {
+            guard !disabled, !flow.osmoBusy else { return }
+            if isToggle, let idx = options.firstIndex(of: current ?? "") {
+                let next = (idx + 1) % 2
+                AppDiagnostics.shared.add("[ui] tap [\(title)] 直接切换「\(current ?? "?")」→「\(options[next])」")
+                Task { await action(next) }
+                return
             }
-        } label: {
-            HStack(spacing: 6) {
-                Text(title)
-                    .font(.system(size: 13))
-                    .foregroundStyle(OC.textSecondary)
-                    .lineLimit(1)
-                Spacer(minLength: 4)
-                HStack(spacing: 3) {
-                    Text(current ?? "—")
-                        .font(.system(size: 13, weight: .medium).monospacedDigit())
-                        .foregroundStyle(disabled ? OC.textTertiary : OC.textPrimary)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.75)
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 9))
-                        .foregroundStyle(OC.textSecondary)
-                }
-            }
-            .padding(.horizontal, 11)
-            .padding(.vertical, 6)
-            .frame(minWidth: 0, maxWidth: .infinity, minHeight: 44)
-            .background(RoundedRectangle(cornerRadius: 8).fill(OC.pill))
-            .contentShape(RoundedRectangle(cornerRadius: 8))
+            AppDiagnostics.shared.add("[ui] tap [\(title)]（请求选项sheet，\(options.count) 档）")
+            presentSheet(.options(OptionSheetContext(title: title, options: options,
+                                                     initialIndex: options.firstIndex(of: current ?? "") ?? 0,
+                                                     onPick: action)))
         }
-        .disabled(disabled || flow.osmoBusy)
     }
 
     /// 通用设置组（优先级：分辨率/帧率 → 视角 → 变焦 → 电子增稳 → 弱光增稳 → 网格。
     /// 慢动作模式以组合格式项替代分辨率/帧率；照片模式无分辨率/帧率。
-    /// ⚠️ ViewBuilder 单帧过大曾致主线程栈溢出（素材页返回整面板重建时，崩溃日志
-    /// OpenMimoControl-2026-11-10-014339：videoPills.getter ___chkstk）——大组必须拆
-    /// 子 builder、闭包体抽方法，勿再往单一 getter 堆控制项）
+    /// ⚠️ ViewBuilder 单帧过大两次撑爆主线程栈（素材页返回整面板重建时，协程线程 512KB
+    /// 栈上评估 body）：2026-11-10-014339 videoPills.getter、2026-11-17-001046
+    /// paramsPanel.getter，均 ___chkstk。防线：胶囊等重复元素抽独立 struct（PillRowView）、
+    /// 大组拆子 builder、弹窗内容抽独立 View——勿往任何 getter/闭包内联堆控制项）
     @ViewBuilder
     private var videoPills: some View {
         videoFormatPills
@@ -663,8 +625,8 @@ struct ControlScreenView: View {
                 options: fovOptions.map(\.name)) { i in
             pickFOV(i)
         }
-        if let range = zoomRange {
-            zoomEntryButton(range)
+        if zoomRange != nil {
+            zoomEntryButton()
         }
     }
     private func pickFOV(_ i: Int) {
@@ -997,7 +959,7 @@ struct ControlScreenView: View {
                 Image(systemName: "photo.on.rectangle.angled")
                     .font(.system(size: 17))
                     .foregroundStyle(Color(hex: 0xC7C7CC))
-                    .padding(6)
+                    .frame(width: 44, height: 44)   // 可点击高度统一（控制区胶囊同高）
             }
             .buttonStyle(.plain)
             .accessibilityLabel("素材浏览")
@@ -1005,13 +967,14 @@ struct ControlScreenView: View {
             shutterButton
             Spacer()
             Button {
+                AppDiagnostics.shared.add("[ui] tap 录制模式（请求sheet）")
                 liveNotice = nil
-                showModeSheet = true
+                presentSheet(.mode)
             } label: {
                 Image(systemName: modeSymbol(st.captureMode))
                     .font(.system(size: 17))
                     .foregroundStyle(Color(hex: 0xC7C7CC))
-                    .padding(6)
+                    .frame(width: 44, height: 44)   // 可点击高度统一（控制区胶囊同高）
             }
             .buttonStyle(.plain)
             .accessibilityLabel("录制模式")
@@ -1026,6 +989,7 @@ struct ControlScreenView: View {
     /// 形态与 02/80 推送的录制状态实时同步（specs「录制控制」）。
     private var shutterButton: some View {
         Button {
+            AppDiagnostics.shared.add("[ui] tap 快门（模式=\(st.captureModeName ?? "?") 录制态=\(st.recordState == 2 ? "录制中" : "待机")）")
             Task { await flow.toggleRecord() }
         } label: {
             ZStack {
@@ -1053,67 +1017,249 @@ struct ControlScreenView: View {
         return st.recordState == 2 ? "停止录制" : "开始录制"
     }
 
-    // MARK: 录制模式弹窗（六模式 + 直播展示项；当前高亮，选择后收起并联动右下角图标）
+    // MARK: 录制模式 / 相机详情弹窗（内容抽为 ModeSheetView / DetailSheetView——
+    // sheet 内容闭包内联进 body 会撑大 body 泛型类型，是主线程栈溢出防线的一部分，见 PillRowView 注释）
 
-    private var modeSheet: some View {
-        VStack(spacing: 12) {
-            HStack {
-                Text("录制模式")
-                    .font(.headline)
-                    .foregroundStyle(OC.textPrimary)
-                Spacer()
-                Button("取消") { showModeSheet = false }
-                    .font(.footnote)
-                    .foregroundStyle(OC.textSecondary)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 5)
-                    .background(Capsule().fill(OC.pill))
-            }
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: 9),
-                                GridItem(.flexible(), spacing: 9)],
-                      spacing: 9) {
-                ForEach(OSMOA4.modeNames, id: \.code) { m in
-                    modeTile(code: m.code, name: m.name, symbol: modeSymbol(m.code))
-                }
-                liveTile
-            }
-            if let notice = liveNotice {
-                Text(notice)
-                    .font(.caption)
-                    .foregroundStyle(OC.recRed)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            Spacer(minLength: 0)
+    // MARK: 相机状态详情弹窗（全量遥测 + 诊断 + 断开连接；从顶部状态区进入）
+}
+
+/// 控制页底部弹窗路由（唯一 sheet 的 item）：全部弹窗共用一个 .sheet 修饰符，
+/// 避免 iOS 上多个 .sheet 修饰符快速连点时 detent 丢失导致弹窗全屏的问题。
+private enum ControlSheetRoute: Identifiable, Equatable {
+    case wheel(WheelSheetContext)
+    case options(OptionSheetContext)
+    case evWheel
+    case zoomWheel
+    case detail
+    case mode
+
+    var id: String {
+        switch self {
+        case .wheel(let ctx): return "wheel-\(ctx.id)"
+        case .options(let ctx): return "options-\(ctx.id)"
+        case .evWheel: return "evWheel"
+        case .zoomWheel: return "zoomWheel"
+        case .detail: return "detail"
+        case .mode: return "mode"
         }
-        .padding(16)
-        .padding(.bottom, 14)
-        .frame(maxWidth: .infinity)
-        .background(OC.card, ignoresSafeAreaEdges: .bottom)
-        .presentationDetents([.height(360)])
-        .presentationDragIndicator(.hidden)
-        .onAppear { liveNotice = nil }
     }
 
+    /// 关联值含闭包（onPick/onClose）无法自动合成，按 id 判等（onChange 需要）
+    static func == (lhs: ControlSheetRoute, rhs: ControlSheetRoute) -> Bool {
+        lhs.id == rhs.id
+    }
+}
+
+/// 参数胶囊本体（控制区标准 44pt 行）。
+/// 独立 struct 是刻意的：ViewBuilder 内联会把 buttonStyle 等修饰符层层嵌进调用方泛型类型，
+/// 素材页返回整面板重建时在协程线程（512KB 栈）评估 body，巨型类型撑爆主线程栈——
+/// 2026-11-10 videoPills.getter、2026-11-17 paramsPanel.getter 两次 ___chkstk 崩溃同根因。
+/// 所有胶囊一律复用本视图，勿在 ViewBuilder 里内联胶囊布局。
+private struct PillRowView: View {
+    let title: String
+    let current: String?
+    let disabled: Bool
+    /// 直切卡片不弹层，去掉下拉箭头以示区别
+    let showChevron: Bool
+    let onTap: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(.system(size: 13))
+                    .foregroundStyle(OC.textSecondary)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                HStack(spacing: 3) {
+                    Text(current ?? "—")
+                        .font(.system(size: 13, weight: .medium).monospacedDigit())
+                        .foregroundStyle(disabled ? OC.textTertiary : OC.textPrimary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                    if showChevron {
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 9))
+                            .foregroundStyle(OC.textSecondary)
+                    }
+                }
+            }
+            .padding(.horizontal, 11)
+            .padding(.vertical, 6)
+            .frame(minWidth: 0, maxWidth: .infinity, minHeight: 44)
+            .background(RoundedRectangle(cornerRadius: 8).fill(OC.pill))
+            .contentShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .opacity(disabled ? 0.45 : 1)
+    }
+}
+
+/// 短选项弹窗上下文（替代系统 Menu——iOS 26 Menu 弹出冻结主线程 300-800ms，2026-11-16 日志实锤）
+private struct OptionSheetContext: Identifiable {
+    let id = UUID()
+    let title: String
+    let options: [String]
+    let initialIndex: Int
+    let onPick: (Int) async -> Void
+}
+
+/// 短选项弹窗（底部弹出，当前项高亮；选择即下发并收起——sheet 通道无 Menu 的主线程冻结）。
+/// 结构/高度走统一容器 OCSelectionSheet；>5 档双列布局（≤10 档，>10 走滚轮）。
+private struct OptionSheetView: View {
+    let ctx: OptionSheetContext
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        OCSelectionSheet(title: ctx.title) {
+            // 双列 5 行恰好放下 10 档（行高 44 + 行距 8 = 内容区 252pt）
+            if ctx.options.count > 5 {
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 8),
+                                    GridItem(.flexible(), spacing: 8)],
+                          spacing: 8) {
+                    ForEach(ctx.options.indices, id: \.self) { i in
+                        optionButton(i)
+                    }
+                }
+            } else {
+                VStack(spacing: 8) {
+                    ForEach(ctx.options.indices, id: \.self) { i in
+                        optionButton(i)
+                    }
+                }
+            }
+        }
+        .onAppear { AppDiagnostics.shared.add("[ui] [\(ctx.title)]选项sheet已呈现") }
+    }
+
+    /// 选项按钮（抽出为独立方法：ViewBuilder 内联体量是栈溢出防线的一部分，见 PillRowView 注释）
+    private func optionButton(_ i: Int) -> some View {
+        Button {
+            AppDiagnostics.shared.add("[ui] 选项sheet[\(ctx.title)] 选「\(ctx.options[i])」(i=\(i))")
+            dismiss()
+            Task { await ctx.onPick(i) }
+        } label: {
+            OCOptionRow(title: ctx.options[i], isSelected: i == ctx.initialIndex)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// 长档位滚轮弹窗上下文（选项 ≥5 的控制项；EV/变焦有专属实现，不走此通用通道）
+private struct WheelSheetContext: Identifiable {
+    let id = UUID()
+    let title: String
+    let options: [String]
+    let initialIndex: Int
+    /// true：滚动跨档即下发（200ms 节流）；false：仅关闭时下发（格式类命令会重启编码器）
+    let live: Bool
+    let rowWidth: CGFloat
+    let onPick: (Int) -> Void
+    let onClose: (() -> Void)?
+}
+
+/// 滚轮弹窗视图（系统 wheel + 逐档震动/音效；关闭必发一次最终选择 + 回读校准）
+private struct WheelSheetView: View {
+    let ctx: WheelSheetContext
+    @State private var index: Int
+    @State private var lastSent = Date.distantPast
+    private let selectionHaptic = UISelectionFeedbackGenerator()
+
+    init(ctx: WheelSheetContext) {
+        self.ctx = ctx
+        _index = State(initialValue: min(max(ctx.initialIndex, 0), max(ctx.options.count - 1, 0)))
+    }
+
+    var body: some View {
+        OCSelectionSheet(title: ctx.title) {
+            Picker(ctx.title, selection: $index) {
+                ForEach(ctx.options.indices, id: \.self) { i in
+                    Text(ctx.options[i])
+                        .font(.system(size: 16, weight: .medium).monospacedDigit())
+                        .minimumScaleFactor(0.6)   // 长文本（1/8000 s）缩放收纳
+                        .lineLimit(1)
+                        .frame(width: ctx.rowWidth, alignment: .trailing)
+                        .tag(i)
+                }
+            }
+            .pickerStyle(.wheel)
+            .frame(height: OCSelectionSheetMetrics.contentHeight)
+            .padding(.horizontal, -8)
+        }
+        .onAppear { AppDiagnostics.shared.add("[ui] [\(ctx.title)]滚轮sheet已呈现") }
+        .onChange(of: index) { i in
+            AppDiagnostics.shared.add("[ui] 滚轮[\(ctx.title)] → 第\(i)档「\(ctx.options[i])」")
+            selectionHaptic.selectionChanged()
+            AudioServicesPlaySystemSound(1104)
+            guard ctx.live, Date().timeIntervalSince(lastSent) > 0.2 else { return }
+            lastSent = Date()
+            ctx.onPick(i)
+        }
+        .onDisappear {
+            AppDiagnostics.shared.add("[ui] 关闭[\(ctx.title)]滚轮sheet（终档=\(index)）")
+            ctx.onPick(index)
+            ctx.onClose?()
+        }
+    }
+}
+
+// MARK: - 录制模式符号（底栏图标与模式瓦片共用）
+
+fileprivate func modeSymbol(_ code: UInt8?) -> String {
+    switch code {
+    case OSMOA4.modePhoto: return "camera.fill"
+    case OSMOA4.modeSuperNight: return "moon.fill"
+    case OSMOA4.modeSlowmo: return "tortoise.fill"
+    case OSMOA4.modeTimelapse: return "timer"
+    case OSMOA4.modeHyperlapse: return "gauge"
+    default: return "video.fill"
+    }
+}
+
+// MARK: - 录制模式弹窗（六模式 + 直播展示项；当前高亮，选择后收起并联动右下角图标）
+// 独立 struct：sheet 内容闭包内联进 body 会撑大 body 泛型类型（主线程栈溢出防线，见 PillRowView 注释）
+
+private struct ModeSheetView: View {
+    @Binding var liveNotice: String?
+    @ObservedObject var flow: ConnectionFlow
+    @Environment(\.dismiss) private var dismiss
+
+    private var st: OSMOStatusSnapshot { flow.osmoStatus }
+
+    var body: some View {
+        OCSelectionSheet(title: "录制模式") {
+            VStack(spacing: 8) {
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 9),
+                                    GridItem(.flexible(), spacing: 9)],
+                          spacing: 9) {
+                    ForEach(OSMOA4.modeNames, id: \.code) { m in
+                        modeTile(code: m.code, name: m.name, symbol: modeSymbol(m.code))
+                    }
+                    liveTile
+                }
+                if let notice = liveNotice {
+                    Text(notice)
+                        .font(.caption)
+                        .foregroundStyle(OC.recRed)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+        .onAppear {
+            AppDiagnostics.shared.add("[ui] 录制模式sheet已呈现")
+            liveNotice = nil
+        }
+    }
+
+    /// 模式瓦片：与选项列表弹窗共用 OCOptionRow 行样式（统一样式），保留引导图标
     private func modeTile(code: UInt8, name: String, symbol: String) -> some View {
-        let current = st.captureMode == code
-        return Button {
-            showModeSheet = false
+        Button {
+            AppDiagnostics.shared.add("[ui] tap 模式[\(name)]")
+            dismiss()
             Task { await flow.switchMode(code) }
         } label: {
-            HStack(spacing: 9) {
-                Image(systemName: symbol)
-                    .font(.system(size: 15))
-                    .foregroundStyle(current ? OC.accent : OC.textSecondary)
-                Text(name)
-                    .font(.subheadline)
-                    .foregroundStyle(OC.textPrimary)
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 12)
-            .background(RoundedRectangle(cornerRadius: 12).fill(current ? OC.accent.opacity(0.14) : OC.pill))
-            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(current ? OC.accent : .clear, lineWidth: 1.5))
-            .contentShape(Rectangle())
+            OCOptionRow(title: name, isSelected: st.captureMode == code, icon: symbol)
         }
         .buttonStyle(.plain)
         .disabled(flow.osmoBusy)
@@ -1125,50 +1271,32 @@ struct ControlScreenView: View {
             // 直播不在实现范围：不发任何命令，明确提示（specs「模式切换」）
             liveNotice = "直播未实现：OA4 不支持直播模式，当前拍摄模式保持不变"
         } label: {
-            HStack(spacing: 9) {
-                Image(systemName: "dot.radiowaves.left.and.right")
-                    .font(.system(size: 15))
-                    .foregroundStyle(OC.textTertiary)
-                Text("直播")
-                    .font(.subheadline)
-                    .foregroundStyle(OC.textTertiary)
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 12)
-            .background(RoundedRectangle(cornerRadius: 12).fill(OC.pill.opacity(0.6)))
-            .contentShape(Rectangle())
+            OCOptionRow(title: "直播", isSelected: false,
+                        icon: "dot.radiowaves.left.and.right", muted: true)
         }
         .buttonStyle(.plain)
         .accessibilityLabel("直播（未实现）")
     }
+}
 
-    private func modeSymbol(_ code: UInt8?) -> String {
-        switch code {
-        case OSMOA4.modePhoto: return "camera.fill"
-        case OSMOA4.modeSuperNight: return "moon.fill"
-        case OSMOA4.modeSlowmo: return "tortoise.fill"
-        case OSMOA4.modeTimelapse: return "timer"
-        case OSMOA4.modeHyperlapse: return "gauge"
-        default: return "video.fill"
-        }
-    }
+// MARK: - 相机状态详情弹窗（全量遥测 + 诊断 + 断开连接；从顶部状态区进入）
+// 独立 struct 理由同 ModeSheetView
 
-    // MARK: 相机状态详情弹窗（全量遥测 + 诊断 + 断开连接；从顶部状态区进入）
+private struct DetailSheetView: View {
+    @ObservedObject var flow: ConnectionFlow
+    @ObservedObject var diagnostics: AppDiagnostics
+    let onDisconnect: () -> Void
+    @Environment(\.dismiss) private var dismiss
 
-    private var detailSheet: some View {
+    private var st: OSMOStatusSnapshot { flow.osmoStatus }
+
+    var body: some View {
         VStack(spacing: 10) {
             HStack {
                 Text("相机状态详情")
                     .font(.headline)
                     .foregroundStyle(OC.textPrimary)
                 Spacer()
-                Button("关闭") { showDetail = false }
-                    .font(.footnote)
-                    .foregroundStyle(OC.textSecondary)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 5)
-                    .background(Capsule().fill(OC.pill))
             }
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 4) {
@@ -1232,12 +1360,7 @@ struct ControlScreenView: View {
                     Text("诊断日志")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(OC.textSecondary)
-                    ForEach(Array(diagnostics.lines.suffix(30).enumerated()), id: \.offset) { _, line in
-                        Text(line)
-                            .font(.system(size: 9.5, design: .monospaced))
-                            .foregroundStyle(OC.textTertiary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
+                    DiagnosticsLogView(lines: Array(diagnostics.lines.suffix(30)))
                 }
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -1247,20 +1370,24 @@ struct ControlScreenView: View {
                 CopyDiagnosticsButton(snapshotProvider: { diagnostics.snapshot() })
                 Spacer()
                 Button("断开连接") {
-                    showDetail = false
+                    dismiss()
                     onDisconnect()
                 }
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(.white)
                 .padding(.horizontal, 18)
-                .padding(.vertical, 8)
+                .frame(minHeight: 44)   // 可点击高度统一（控制区胶囊同高）
                 .background(RoundedRectangle(cornerRadius: 12).fill(OC.recRed))
             }
         }
         .padding(16)
         .frame(maxWidth: .infinity)
-        .background(OC.card, ignoresSafeAreaEdges: .bottom)
+        // 不再叠 OC.card：直接用系统 sheet 的半透明玻璃底（iOS 26），避免双层背景。
+        // HIG：medium+large 可调整高度的 sheet 应含 grabber（点击换档 + VoiceOver 支持）；
+        // 纯浏览无待存状态，无 Cancel/Done 语义，下滑关闭即可。
         .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+        .onAppear { AppDiagnostics.shared.add("[ui] 详情sheet已呈现") }
     }
 
     private var detailRows: [(String, String)] {
@@ -1268,11 +1395,11 @@ struct ControlScreenView: View {
             ("拍摄模式", st.captureModeName ?? "—"),
             ("工作状态", st.workModeName ?? "—"),
             ("录制状态", st.recordStateName ?? "—"),
-            ("已录时长", st.recordSeconds.map { Self.durationText(Int64($0)) }
-                ?? st.clipSeconds.map { Self.durationText($0) } ?? "—"),
+            ("已录时长", st.recordSeconds.map { OCFormat.duration(Int64($0)) }
+                ?? st.clipSeconds.map { OCFormat.duration($0) } ?? "—"),
             ("写文件", st.isWritingFile ? "是" : "否"),
             ("媒体库模式", st.mediaMode ? "开" : "关"),
-            ("剩余可录", st.videoSecondsLeft.map { Self.durationText($0) } ?? "—"),
+            ("剩余可录", st.videoSecondsLeft.map { OCFormat.duration($0) } ?? "—"),
             ("剩余张数", st.photosLeft.map(String.init) ?? "—"),
             ("视频格式", [st.videoResolutionName, st.videoFpsName.map { "\($0)fps" }]
                 .compactMap { $0 }.joined(separator: " ")),
@@ -1339,7 +1466,7 @@ struct ControlScreenView: View {
             rows.append(("cam_lapse_param", lapseText))
         }
         if let s = st.recordSeconds {
-            rows.append(("cam_record_time", "已录 \(Self.durationText(Int64(s)))"))
+            rows.append(("cam_record_time", "已录 \(OCFormat.duration(Int64(s)))"))
         }
         if let p = st.portraitMode { rows.append(("cam_portrait_mode", p ? "竖拍" : "横拍")) }
         return rows
@@ -1349,86 +1476,20 @@ struct ControlScreenView: View {
         guard st.lapseIntervalDeciS != nil || st.lapseDurationS != nil || st.lapseSpeed != nil else { return "—" }
         var parts: [String] = []
         if let iv = st.lapseIntervalDeciS { parts.append(String(format: "间隔 %.1fs", Double(iv) / 10)) }
-        if let du = st.lapseDurationS, du > 0 { parts.append("时长 \(Self.durationText(Int64(du)))") }
+        if let du = st.lapseDurationS, du > 0 { parts.append("时长 \(OCFormat.duration(Int64(du)))") }
         if let du = st.lapseDurationS, du == 0 { parts.append("时长 不限") }
         if let sp = st.lapseSpeed, sp > 0 { parts.append("\(sp)×") }
         if let keep = st.lapseKeepName { parts.append(keep) }
         return parts.joined(separator: " · ")
     }
 
-    private static func durationText(_ s: Int64) -> String {
-        s >= 3600 ? String(format: "%d:%02d:%02d", s / 3600, s % 3600 / 60, s % 60)
-                  : String(format: "%02d:%02d", s / 60, s % 60)
-    }
-
-    private static func timeText(_ d: Date) -> String {
+    private static let timeFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "HH:mm:ss"
-        return f.string(from: d)
-    }
-}
+        return f
+    }()
 
-/// 长档位滚轮弹窗上下文（选项 ≥5 的控制项；EV/变焦有专属实现，不走此通用通道）
-private struct WheelSheetContext: Identifiable {
-    let id = UUID()
-    let title: String
-    let options: [String]
-    let initialIndex: Int
-    /// true：滚动跨档即下发（200ms 节流）；false：仅关闭时下发（格式类命令会重启编码器）
-    let live: Bool
-    let rowWidth: CGFloat
-    let onPick: (Int) -> Void
-    let onClose: (() -> Void)?
-}
-
-/// 滚轮弹窗视图（系统 wheel + 逐档震动/音效；关闭必发一次最终选择 + 回读校准）
-private struct WheelSheetView: View {
-    let ctx: WheelSheetContext
-    @State private var index: Int
-    @State private var lastSent = Date.distantPast
-    private let selectionHaptic = UISelectionFeedbackGenerator()
-
-    init(ctx: WheelSheetContext) {
-        self.ctx = ctx
-        _index = State(initialValue: min(max(ctx.initialIndex, 0), max(ctx.options.count - 1, 0)))
-    }
-
-    var body: some View {
-        VStack(spacing: 8) {
-            Text(ctx.title)
-                .font(.system(size: 17, weight: .bold))
-                .foregroundStyle(OC.textPrimary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Picker(ctx.title, selection: $index) {
-                ForEach(ctx.options.indices, id: \.self) { i in
-                    Text(ctx.options[i])
-                        .font(.system(size: 16, weight: .medium).monospacedDigit())
-                        .minimumScaleFactor(0.6)   // 长文本（1/8000 s）缩放收纳
-                        .lineLimit(1)
-                        .frame(width: ctx.rowWidth, alignment: .trailing)
-                        .tag(i)
-                }
-            }
-            .pickerStyle(.wheel)
-            .frame(height: 170)
-            .padding(.horizontal, -8)
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 12)
-        .padding(.bottom, 8)
-        .background(OC.card, ignoresSafeAreaEdges: .bottom)
-        .presentationDetents([.height(220)])
-        .presentationDragIndicator(.hidden)
-        .onChange(of: index) { i in
-            selectionHaptic.selectionChanged()
-            AudioServicesPlaySystemSound(1104)
-            guard ctx.live, Date().timeIntervalSince(lastSent) > 0.2 else { return }
-            lastSent = Date()
-            ctx.onPick(i)
-        }
-        .onDisappear {
-            ctx.onPick(index)
-            ctx.onClose?()
-        }
+    private static func timeText(_ d: Date) -> String {
+        timeFormatter.string(from: d)
     }
 }

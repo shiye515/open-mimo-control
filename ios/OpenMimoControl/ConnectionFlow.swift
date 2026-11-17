@@ -142,18 +142,22 @@ final class ConnectionFlow: ObservableObject {
         }
         guard !osmoBusy else {
             osmoError = "上一条命令执行中，请稍候"
+            log(.connecting, "✗ \(name)被拒", content: "单飞：上一条命令在途（用户点击被吞）")
             return nil
         }
         osmoBusy = true
         defer { osmoBusy = false }
+        let t0 = DispatchTime.now()
         do {
             let r = try await op(link)
+            let ms = Int((DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1_000_000)
             osmoError = nil
-            log(.connecting, "✓ \(name)", content: "")
+            log(.connecting, "✓ \(name)", content: "命令往返 \(ms)ms")
             return r
         } catch {
+            let ms = Int((DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1_000_000)
             osmoError = error.localizedDescription
-            log(.connecting, "✗ \(name)失败", content: error.localizedDescription)
+            log(.connecting, "✗ \(name)失败", content: "\(ms)ms · \(error.localizedDescription)")
             return nil
         }
     }
@@ -353,7 +357,7 @@ final class ConnectionFlow: ObservableObject {
         // 缓存 MAC 供后台 BLE 任务的唤醒广播使用（相机 datalink 时常停 BLE 广播，
         // 扫描失败后需 WKP 广播触发其恢复）
         if cameraMAC == nil, let hex = UserDefaults.standard.string(forKey: "camera.mac") {
-            cameraMAC = hexToBytes(hex)
+            cameraMAC = hex.hexToBytes()
         }
         // 电量：直连路径无 BLE 推送源（相机已停 BLE 广播）——会话从 BLE 缓存播种，UI 显示缓存值
         if let cached = CameraBleWaker.cachedBatteryPercent() {
@@ -398,7 +402,7 @@ final class ConnectionFlow: ObservableObject {
         // 优先缓存 MAC（历史成功值），无缓存才现场扫描；扫描 3 轮，全败回退缓存
         var mac: [UInt8]? = nil
         if let hex = UserDefaults.standard.string(forKey: "camera.mac") {
-            mac = hexToBytes(hex)
+            mac = hex.hexToBytes()
             log(.waking, "使用缓存 MAC", content: hex)
         }
         if mac == nil {
@@ -415,9 +419,9 @@ final class ConnectionFlow: ObservableObject {
             return false
         }
         // MAC 解析成功后写入缓存，下次跳过扫描
-        UserDefaults.standard.set(mac.map { String(format: "%02x", $0) }.joined(), forKey: "camera.mac")
+        UserDefaults.standard.set(mac.hexEncoded, forKey: "camera.mac")
         let reversed = [UInt8](mac.reversed())
-        log(.waking, "唤醒广播参数", content: "MAC=\(mac.map { String(format: "%02x", $0) }.joined()) 反序=\(reversed.map { String(format: "%02x", $0) }.joined())")
+        log(.waking, "唤醒广播参数", content: "MAC=\(mac.hexEncoded) 反序=\(reversed.hexEncoded)")
 
         // 广播 2 轮×2.5s（HotspotWaker 为 CBPeripheralManager）
         let waker = HotspotWaker.shared
@@ -572,17 +576,6 @@ final class ConnectionFlow: ObservableObject {
                 Task { @MainActor in cont.resume(returning: mac) }
             }
         }
-    }
-
-    private func hexToBytes(_ hex: String) -> [UInt8]? {
-        var bytes: [UInt8] = []
-        var idx = hex.startIndex
-        while idx < hex.endIndex {
-            let next = hex.index(idx, offsetBy: 2, limitedBy: hex.endIndex) ?? hex.endIndex
-            if let b = UInt8(hex[idx..<next], radix: 16) { bytes.append(b) }
-            idx = next
-        }
-        return bytes.isEmpty ? nil : bytes
     }
 
     private func fail(_ step: ConnectionStep, _ reason: String) {

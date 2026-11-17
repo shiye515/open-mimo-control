@@ -70,7 +70,7 @@ public final class OSMOH265Renderer: NSObject {
                 diag("[渲染器] SPS 变化（编码器重启，\(dims)）→ flush + 重建 format")
                 if Self.parseSPSDims(s) == nil {
                     // 尺寸解析失败：记录 SPS 原始字节，供离线修正解析器
-                    let hex = [UInt8](s).prefix(80).map { String(format: "%02x", $0) }.joined()
+                    let hex = [UInt8](s).prefix(80).hexEncoded
                     diag("[渲染器] SPS 解析失败 len=\(s.count) hex=\(hex)")
                 }
                 layer?.flush()

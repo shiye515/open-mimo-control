@@ -232,7 +232,7 @@ struct MediaBrowseView: View {
                                 .font(.system(size: 9.5).monospacedDigit())
                                 .foregroundStyle(.white.opacity(0.9))
                             if file.isVideo, file.durationSec > 0 {
-                                Text(Self.durationText(file.durationSec))
+                                Text(OCFormat.duration(Int64(file.durationSec)))
                                     .font(.system(size: 9).monospacedDigit())
                                     .foregroundStyle(.white.opacity(0.7))
                             }
@@ -265,7 +265,7 @@ struct MediaBrowseView: View {
                 detailRow("文件名", file.name)
                 detailRow("大小", Self.byteText(file.sizeBytes))
                 if file.isVideo {
-                    detailRow("时长", Self.durationText(file.durationSec))
+                    detailRow("时长", OCFormat.duration(Int64(file.durationSec)))
                 }
                 if let date = file.capturedAt {
                     detailRow("拍摄时间", Self.dateText(date))
@@ -295,7 +295,7 @@ struct MediaBrowseView: View {
                         .foregroundStyle(model.savedToPhotos.contains(file.path) ? OC.okGreen : .white)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 11)
-                        .background(RoundedRectangle(cornerRadius: 12).fill(
+                        .background(RoundedRectangle(cornerRadius: 10).fill(
                             model.savedToPhotos.contains(file.path)
                                 ? AnyShapeStyle(OC.okGreen.opacity(0.14)) : AnyShapeStyle(OC.accent)))
                 }
@@ -308,7 +308,7 @@ struct MediaBrowseView: View {
                         .foregroundStyle(OC.recRed)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 11)
-                        .background(RoundedRectangle(cornerRadius: 12).fill(OC.recRed.opacity(0.12)))
+                        .background(RoundedRectangle(cornerRadius: 10).fill(OC.recRed.opacity(0.12)))
                 }
                 .disabled(model.busyFile == file.path)
             }
@@ -316,7 +316,7 @@ struct MediaBrowseView: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(OC.card, ignoresSafeAreaEdges: .bottom)
+        // 不叠 OC.card：直接用系统 sheet 的半透明玻璃底（iOS 26），避免双层背景（与控制页弹窗一致）
         .ocToast($model.notice)
         .presentationDetents([.large])
         .presentationDragIndicator(.hidden)
@@ -400,19 +400,20 @@ struct MediaBrowseView: View {
 
     // MARK: 格式化
 
-    static func durationText(_ s: Int) -> String {
-        String(format: "%02d:%02d", s / 60, s % 60)
-    }
-
     static func byteText(_ bytes: Int64) -> String {
         bytes >= 1 << 30 ? String(format: "%.2f GB", Double(bytes) / Double(1 << 30))
             : bytes >= 1 << 20 ? String(format: "%.1f MB", Double(bytes) / Double(1 << 20))
             : String(format: "%.0f KB", Double(bytes) / Double(1 << 10))
     }
 
-    static func dateText(_ date: Date) -> String {
+    /// 拍摄时间格式化器（静态复用：DateFormatter 构造开销大）
+    private static let dateFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd HH:mm"
-        return f.string(from: date)
+        return f
+    }()
+
+    static func dateText(_ date: Date) -> String {
+        dateFormatter.string(from: date)
     }
 }

@@ -109,7 +109,7 @@ public final class CameraBleWaker: NSObject, ObservableObject, CBCentralManagerD
 
     /// 帧收发原始 hex 记录（真机协议校准的关键观察点）。
     private func logFrame(_ direction: String, _ data: Data) {
-        let hex = [UInt8](data).map { String(format: "%02x", $0) }.joined()
+        let hex = [UInt8](data).hexEncoded
         log("\(direction)帧 hex[\(data.count)B]: \(hex)")
     }
 
@@ -378,7 +378,7 @@ public final class CameraBleWaker: NSObject, ObservableObject, CBCentralManagerD
                 central.stopScan()
                 let mac = [UInt8](mf.suffix(6))
                 // 命中即持久化 MAC（ConnectionFlow 后续可直接用缓存）
-                UserDefaults.standard.set(mac.map { String(format: "%02x", $0) }.joined(), forKey: "camera.mac")
+                UserDefaults.standard.set(mac.hexEncoded, forKey: "camera.mac")
                 let cb = macScanCompletion
                 macScanCompletion = nil
                 cb?(mac)
@@ -392,11 +392,11 @@ public final class CameraBleWaker: NSObject, ObservableObject, CBCentralManagerD
         // 广播 manufacturer data 尾 6 字节 = 相机 MAC（**，与 wifi_get_mac 一致）
         for (k, v) in advertisementData {
             if let d = v as? Data {
-                let hx = [UInt8](d).map { String(format: "%02x", $0) }.joined()
+                let hx = [UInt8](d).hexEncoded
                 log("广播 \(k): \(hx)")
                 if k == CBAdvertisementDataManufacturerDataKey, d.count >= 6 {
                     cameraMAC = [UInt8](d.suffix(6))
-                    log("相机 MAC=\(cameraMAC!.map { String(format: "%02x", $0) }.joined())")
+                    log("相机 MAC=\(cameraMAC!.hexEncoded)")
                 }
             } else if k != CBAdvertisementDataOverflowServiceUUIDsKey {
                 log("广播 \(k): \(v)")
@@ -491,7 +491,7 @@ public final class CameraBleWaker: NSObject, ObservableObject, CBCentralManagerD
             let sof = frameBuffer[0]
             guard sof == DjiRProtocol.sof || sof == 0x55 else {
                 // 未知帧头：记录前 16 字节便于观察协议形态
-                let head = frameBuffer.prefix(16).map { String(format: "%02x", $0) }.joined()
+                let head = frameBuffer.prefix(16).hexEncoded
                 log("⚠ 未识别帧头 0x\(String(format: "%02x", sof))，数据头: \(head)")
                 frameBuffer.removeFirst(); continue
             }
@@ -506,11 +506,11 @@ public final class CameraBleWaker: NSObject, ObservableObject, CBCentralManagerD
                   let duml = MimoFrame.parse(Data(frameBuffer.prefix(frameLen))) {
             // DUML 帧：WMS 加密通道的可能载体（"APP->WMS"），与 R 帧同通道复用
             frameBuffer.removeFirst(frameLen)
-            log("◇ RX DUML 帧: src=0x\(String(duml.sender, radix: 16)) dst=0x\(String(duml.receiver, radix: 16)) cmdType=0x\(String(duml.cmdType, radix: 16)) cmdSet=0x\(String(duml.cmdSet, radix: 16)) cmdId=0x\(String(duml.cmdId, radix: 16)) payload[\(duml.payload.count)B]=\([UInt8](duml.payload).map { String(format: "%02x", $0) }.joined())")
+            log("◇ RX DUML 帧: src=0x\(String(duml.sender, radix: 16)) dst=0x\(String(duml.receiver, radix: 16)) cmdType=0x\(String(duml.cmdType, radix: 16)) cmdSet=0x\(String(duml.cmdSet, radix: 16)) cmdId=0x\(String(duml.cmdId, radix: 16)) payload[\(duml.payload.count)B]=\([UInt8](duml.payload).hexEncoded)")
             handleDumlFrame(duml)
         } else {
             // 未知帧：完整记录供协议校准
-            let duml = frameBuffer.prefix(frameLen).map { String(format: "%02x", $0) }.joined()
+            let duml = frameBuffer.prefix(frameLen).hexEncoded
             log("◇ RX 未识别帧 [\(frameLen)B]: \(duml)")
             frameBuffer.removeFirst(max(frameLen, 1))
         }
@@ -572,22 +572,22 @@ public final class CameraBleWaker: NSObject, ObservableObject, CBCentralManagerD
                     UserDefaults.standard.set(pct, forKey: "camera.battery_percent")
                     log("✓ BLE 电量(0d,02)=\(pct)%（@20 u16 LE）")
                 } else {
-                    log("◇ BLE 电量推送(0d,02) @20=\(pct) 超域，原始=\(p.map { String(format: "%02x", $0) }.joined())")
+                    log("◇ BLE 电量推送(0d,02) @20=\(pct) 超域，原始=\(p.hexEncoded)")
                 }
             } else {
-                log("◇ BLE 电量推送(0d,02) 仅\(p.count)B，原始=\(p.map { String(format: "%02x", $0) }.joined())")
+                log("◇ BLE 电量推送(0d,02) 仅\(p.count)B，原始=\(p.hexEncoded)")
             }
             return
         }
         // (0x02,0xdc) 相机变体推送 ~2Hz 22B：XS 实测 payload 前缀 0012 0100 0001 与 cam_storage 值同构
         if f.cmdSet == 0x02, f.cmdId == 0xDC {
-            let hex = p.map { String(format: "%02x", $0) }.joined()
+            let hex = p.hexEncoded
             log("◇ BLE 相机推送(02,dc) [\(p.count)B]=\(hex)")
             return
         }
     }
 
-    private func handleRFrame(_ frame: DjiRProtocol.Frame) {        log("◇ RX 0xAA 帧: cmdSet=0x\(String(frame.cmdSet, radix: 16)) cmdId=0x\(String(frame.cmdId, radix: 16)) isAck=\(frame.isAck) seq=\(frame.sequence) payload[\(frame.payload.count)B]=\([UInt8](frame.payload).map { String(format: "%02x", $0) }.joined())")
+    private func handleRFrame(_ frame: DjiRProtocol.Frame) {        log("◇ RX 0xAA 帧: cmdSet=0x\(String(frame.cmdSet, radix: 16)) cmdId=0x\(String(frame.cmdId, radix: 16)) isAck=\(frame.isAck) seq=\(frame.sequence) payload[\(frame.payload.count)B]=\([UInt8](frame.payload).hexEncoded)")
         // ECDH 交换应答（0x12,0x92）
         if frame.cmdSet == 0x12, frame.cmdId == 0x92 {
             handleECDHResponse([UInt8](frame.payload))
@@ -602,7 +602,7 @@ public final class CameraBleWaker: NSObject, ObservableObject, CBCentralManagerD
         if frame.cmdSet == 0x00, frame.cmdId == 0x00, frame.isAck {
             let p = [UInt8](frame.payload)
             let ret = p.count >= 2 ? UInt16(p[0]) | UInt16(p[1]) << 8 : 0xFFFF
-            let info = p.count > 2 ? String(bytes: p[2...], encoding: .utf8) ?? p[2...].map { String(format: "%02x", $0) }.joined() : "空"
+            let info = p.count > 2 ? String(bytes: p[2...], encoding: .utf8) ?? p[2...].hexEncoded : "空"
             log("◇ 版本查询应答: ret=\(ret) 信息=\(info) → \(ret == 0 ? "✓ 连接闭环正常" : "✗ 连接未闭环（后续命令都会失败）")")
             return
         }

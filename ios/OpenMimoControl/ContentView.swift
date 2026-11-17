@@ -45,7 +45,7 @@ final class AppSessionHolder {
                      onTCPData: { data in
                          // TCP 7001 RTP 信令：提取 SRTP 密钥（live-view.md §5）
                          if let key = SRTPSignaling.extractKey(data) {
-                             let hex = key.map { String(format: "%02x", $0) }.joined()
+                             let hex = key.hexEncoded
                              Task { @MainActor in
                                  AppDiagnostics.shared.add("[srtp] 密钥下发: \(hex)")
                                  await AppSessionHolder.shared.session?.deliverSRTPKey(key)
@@ -62,6 +62,7 @@ struct ContentView: View {
 
     init() {
         AppSessionHolder.bootstrapDiagnostics()
+        AppDiagnostics.shared.startMainThreadProbe()   // 主线程健康探针（0.5s 心跳，卡顿限频记录）
     }
 
     var body: some View {

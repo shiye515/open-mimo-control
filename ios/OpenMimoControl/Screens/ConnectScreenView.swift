@@ -152,7 +152,7 @@ struct ConnectScreenView: View {
                     .font(.caption.weight(.medium))
                     .foregroundStyle(.white)
                     .padding(.horizontal, 12)
-                    .padding(.vertical, 5)
+                    .frame(minHeight: 44)   // 可点击高度统一（控制区胶囊同高）
                     .background(Capsule().fill(OC.accent))
             }
         }
@@ -257,14 +257,13 @@ struct ConnectScreenView: View {
             if !stepLogger.entries.isEmpty {
                 DisclosureGroup("步骤日志（\(stepLogger.entries.count)）", isExpanded: $showLogs) {
                     ScrollView {
-                        VStack(alignment: .leading, spacing: 2) {
-                            ForEach(stepLogger.entries) { e in
-                                Text("\(e.time) | \(e.step) | \(e.purpose) | \(e.content)")
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .foregroundStyle(OC.textSecondary)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                        }
+                        DiagnosticsLogView(
+                            lines: stepLogger.entries.map {
+                                "\($0.time) | \($0.step) | \($0.purpose) | \($0.content)"
+                            },
+                            font: .system(size: 10, design: .monospaced),
+                            textColor: OC.textSecondary
+                        )
                         .padding(8)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
